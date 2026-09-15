@@ -514,22 +514,13 @@ function computeMedianWhatIfStandings() {
   })).sort((a, b) => b.wins - a.wins || b.pf - a.pf);
 }
 
-// Assigns competition-style ranks (1,2,2,4) to a standings list already
-// sorted descending by wins. Teams with equal wins share a tied rank,
-// labeled "T-<rank>"; untied teams just get the plain number.
-function rankTeams(list) {
+// Maps team id -> its W-L(-T) record string for a given standings list,
+// e.g. "6-3" or "6-3-1" if there are ties.
+function recordMap(list) {
   const map = {};
-  let i = 0;
-  while (i < list.length) {
-    let j = i;
-    while (j + 1 < list.length && list[j + 1].wins === list[i].wins) j++;
-    const rank = i + 1;
-    const tied = j > i;
-    for (let k = i; k <= j; k++) {
-      map[list[k].id] = tied ? `T-${rank}` : `${rank}`;
-    }
-    i = j + 1;
-  }
+  list.forEach(t => {
+    map[t.id] = `${t.wins}-${t.losses}${t.ties ? '-' + t.ties : ''}`;
+  });
   return map;
 }
 
@@ -540,10 +531,10 @@ function renderStandings() {
   const whatIf = computeWhatIfStandings();
   const medianWhatIf = computeMedianWhatIfStandings();
 
-  const standardRanks = rankTeams(standard);
-  const medianRanks = rankTeams(med);
-  const whatIfRanks = rankTeams(whatIf);
-  const medianWhatIfRanks = rankTeams(medianWhatIf);
+  const standardRecords = recordMap(standard);
+  const medianRecords = recordMap(med);
+  const whatIfRecords = recordMap(whatIf);
+  const medianWhatIfRecords = recordMap(medianWhatIf);
 
   const rowHtml = (t, i, extraCol) => `
     <tr class="${i === 0 ? 'rank1' : ''}">
@@ -577,17 +568,17 @@ function renderStandings() {
     </section>
     <section class="block">
       <h2>Standings Comparison</h2>
-      <p class="sub">Each team's rank across every standings table — ties share a rank, marked "T-"</p>
+      <p class="sub">Each team's record across every standings table</p>
       <table>
         <thead><tr><th>Team</th><th class="num">Season</th><th class="num">Median</th><th class="num">What If</th><th class="num">Median What If</th></tr></thead>
         <tbody>
           ${standard.map(t => `
             <tr>
               <td class="team">${t.name}</td>
-              <td class="num">${standardRanks[t.id] || '—'}</td>
-              <td class="num">${medianRanks[t.id] || '—'}</td>
-              <td class="num">${whatIfRanks[t.id] || '—'}</td>
-              <td class="num">${medianWhatIfRanks[t.id] || '—'}</td>
+              <td class="num">${standardRecords[t.id] || '—'}</td>
+              <td class="num">${medianRecords[t.id] || '—'}</td>
+              <td class="num">${whatIfRecords[t.id] || '—'}</td>
+              <td class="num">${medianWhatIfRecords[t.id] || '—'}</td>
             </tr>`).join('')}
         </tbody>
       </table>
