@@ -436,11 +436,15 @@ function renderMoneyTable(champCheckboxChecked) {
 // entries for the WHOLE season, not just that week -- so every consumer of
 // weeklyBoxscores must filter to m.matchupPeriodId === week, or unplayed
 // future weeks (all-zero scores) get counted as extra ties/games.
+// It also returns an entry for the current week before it's actually been
+// played, with everyone at 0 points -- so we additionally only count a week
+// if WEEKLY (built from real, posted scores) confirms it's actually happened.
 function buildOptimalWeeklyScores() {
   const weeklyScores = {}; // week -> [{teamId, points}]
   const weeklyBox = (LEAGUE && LEAGUE.weeklyBoxscores) || {};
   Object.entries(weeklyBox).forEach(([wk, matchups]) => {
     const week = Number(wk);
+    if (!WEEKLY[week] || WEEKLY[week].length === 0) return; // week hasn't been played yet
     const real = (matchups || []).filter(m => m.matchupPeriodId === week);
     real.forEach(m => {
       if (!m.home) return;
@@ -461,6 +465,7 @@ function computeWhatIfStandings() {
   const weeklyBox = (LEAGUE && LEAGUE.weeklyBoxscores) || {};
   Object.entries(weeklyBox).forEach(([wk, matchups]) => {
     const week = Number(wk);
+    if (!WEEKLY[week] || WEEKLY[week].length === 0) return; // week hasn't been played yet
     const real = (matchups || []).filter(m => m.matchupPeriodId === week);
     real.forEach(m => {
       if (!m.home) return;
