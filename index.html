@@ -195,18 +195,13 @@
 
   /* Wide tables (Standings Comparison, Position Breakdown, Weekly Scoring) */
   .table-scroll { overflow-x: auto; }
-  .table-scroll table { min-width: 640px; }
-  /* Freeze the Team column so it stays visible while scrolling horizontally
-     on mobile -- every .table-scroll table has Team as its first column. */
-  .table-scroll th:first-child,
-  .table-scroll td:first-child {
-    position: sticky;
-    left: 0;
-    z-index: 1;
-    background: var(--bg);
-    box-shadow: 2px 0 4px -2px rgba(0, 0, 0, 0.5);
+  .table-scroll table { table-layout: auto; width: auto; }
+  .table-scroll td:first-child, .table-scroll th:first-child {
+    max-width: 140px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
-  .table-scroll thead th:first-child { z-index: 2; }
 
   /* Streaks / luck index colors */
   .streak-w { color: var(--win); font-weight: 700; }
