@@ -432,10 +432,43 @@ function renderMoneyTable(champCheckboxChecked) {
   `;
 }
 
+function computeWhatIfStandings() {
+  const tally = {};
+  Object.keys(TEAMS).forEach(id => { tally[id] = { wins: 0, losses: 0, ties: 0, pf: 0 }; });
+
+  const weeklyBox = (LEAGUE && LEAGUE.weeklyBoxscores) || {};
+  Object.entries(weeklyBox).forEach(([wk, matchups]) => {
+    const week = Number(wk);
+    (matchups || []).forEach(m => {
+      if (!m.home) return;
+      const homeId = m.home.teamId;
+      const homeOpt = computeOptimalScore(m.home, week);
+      if (!tally[homeId]) tally[homeId] = { wins: 0, losses: 0, ties: 0, pf: 0 };
+      tally[homeId].pf += homeOpt;
+
+      if (m.away) {
+        const awayId = m.away.teamId;
+        const awayOpt = computeOptimalScore(m.away, week);
+        if (!tally[awayId]) tally[awayId] = { wins: 0, losses: 0, ties: 0, pf: 0 };
+        tally[awayId].pf += awayOpt;
+
+        if (homeOpt > awayOpt) { tally[homeId].wins++; tally[awayId].losses++; }
+        else if (awayOpt > homeOpt) { tally[awayId].wins++; tally[homeId].losses++; }
+        else { tally[homeId].ties++; tally[awayId].ties++; }
+      }
+    });
+  });
+
+  return Object.entries(tally).map(([id, v]) => ({
+    id, name: teamName(TEAMS[id]), ...v
+  })).sort((a, b) => b.wins - a.wins || b.pf - a.pf);
+}
+
 function renderStandings() {
   const standard = computeStandardStandings();
   const med = computeMedianStandings();
   const highScores = computeWeeklyHighScores();
+  const whatIf = computeWhatIfStandings();
 
   const rowHtml = (t, i, extraCol) => `
     <tr class="${i === 0 ? 'rank1' : ''}">
@@ -464,6 +497,16 @@ function renderStandings() {
         <thead><tr><th></th><th>Team</th><th class="num">Median Record</th><th class="num">Points For</th><th></th></tr></thead>
         <tbody>
           ${med.map((t, i) => rowHtml(t, i, `<td></td>`)).join('')}
+        </tbody>
+      </table>
+    </section>
+    <section class="block">
+      <h2>What-If Standings</h2>
+      <p class="sub">Record if every team started their optimal lineup each week</p>
+      <table>
+        <thead><tr><th></th><th>Team</th><th class="num">What-If Record</th><th class="num">Optimal Points</th><th></th></tr></thead>
+        <tbody>
+          ${whatIf.map((t, i) => rowHtml(t, i, `<td></td>`)).join('') || '<tr><td colspan="4" class="placeholder">No box score data yet.</td></tr>'}
         </tbody>
       </table>
     </section>
