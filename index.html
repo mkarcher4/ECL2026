@@ -514,12 +514,36 @@ function computeMedianWhatIfStandings() {
   })).sort((a, b) => b.wins - a.wins || b.pf - a.pf);
 }
 
+// Assigns competition-style ranks (1,2,2,4) to a standings list already
+// sorted descending by wins. Teams with equal wins share a tied rank,
+// labeled "T-<rank>"; untied teams just get the plain number.
+function rankTeams(list) {
+  const map = {};
+  let i = 0;
+  while (i < list.length) {
+    let j = i;
+    while (j + 1 < list.length && list[j + 1].wins === list[i].wins) j++;
+    const rank = i + 1;
+    const tied = j > i;
+    for (let k = i; k <= j; k++) {
+      map[list[k].id] = tied ? `T-${rank}` : `${rank}`;
+    }
+    i = j + 1;
+  }
+  return map;
+}
+
 function renderStandings() {
   const standard = computeStandardStandings();
   const med = computeMedianStandings();
   const highScores = computeWeeklyHighScores();
   const whatIf = computeWhatIfStandings();
   const medianWhatIf = computeMedianWhatIfStandings();
+
+  const standardRanks = rankTeams(standard);
+  const medianRanks = rankTeams(med);
+  const whatIfRanks = rankTeams(whatIf);
+  const medianWhatIfRanks = rankTeams(medianWhatIf);
 
   const rowHtml = (t, i, extraCol) => `
     <tr class="${i === 0 ? 'rank1' : ''}">
@@ -538,6 +562,33 @@ function renderStandings() {
         <thead><tr><th></th><th>Team</th><th class="num">Record</th><th class="num">Points For</th><th class="num">Points Against</th></tr></thead>
         <tbody>
           ${standard.map((t, i) => rowHtml(t, i, `<td class="num">${t.pa.toFixed(1)}</td>`)).join('')}
+        </tbody>
+      </table>
+    </section>
+    <section class="block">
+      <h2>Weekly High Scorers</h2>
+      <p class="sub">Top scoring team each week — each win earns the $${WEEKLY_PRIZE} weekly prize</p>
+      <table>
+        <thead><tr><th class="num">Week</th><th>Team</th><th class="num">Points</th></tr></thead>
+        <tbody>
+          ${highScores.map(h => `<tr><td class="num">${h.week}</td><td class="team">${h.name}</td><td class="num">${h.points.toFixed(1)}</td></tr>`).join('') || '<tr><td colspan="3" class="placeholder">No completed weeks yet.</td></tr>'}
+        </tbody>
+      </table>
+    </section>
+    <section class="block">
+      <h2>Standings Comparison</h2>
+      <p class="sub">Each team's rank across every standings table — ties share a rank, marked "T-"</p>
+      <table>
+        <thead><tr><th>Team</th><th class="num">Season</th><th class="num">Median</th><th class="num">What If</th><th class="num">Median What If</th></tr></thead>
+        <tbody>
+          ${standard.map(t => `
+            <tr>
+              <td class="team">${t.name}</td>
+              <td class="num">${standardRanks[t.id] || '—'}</td>
+              <td class="num">${medianRanks[t.id] || '—'}</td>
+              <td class="num">${whatIfRanks[t.id] || '—'}</td>
+              <td class="num">${medianWhatIfRanks[t.id] || '—'}</td>
+            </tr>`).join('')}
         </tbody>
       </table>
     </section>
@@ -568,16 +619,6 @@ function renderStandings() {
         <thead><tr><th></th><th>Team</th><th class="num">Median What-If Record</th><th class="num">Optimal Points</th><th></th></tr></thead>
         <tbody>
           ${medianWhatIf.map((t, i) => rowHtml(t, i, `<td></td>`)).join('') || '<tr><td colspan="4" class="placeholder">No box score data yet.</td></tr>'}
-        </tbody>
-      </table>
-    </section>
-    <section class="block">
-      <h2>Weekly High Scorers</h2>
-      <p class="sub">Top scoring team each week — each win earns the $${WEEKLY_PRIZE} weekly prize</p>
-      <table>
-        <thead><tr><th class="num">Week</th><th>Team</th><th class="num">Points</th></tr></thead>
-        <tbody>
-          ${highScores.map(h => `<tr><td class="num">${h.week}</td><td class="team">${h.name}</td><td class="num">${h.points.toFixed(1)}</td></tr>`).join('') || '<tr><td colspan="3" class="placeholder">No completed weeks yet.</td></tr>'}
         </tbody>
       </table>
     </section>
