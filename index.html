@@ -26,7 +26,7 @@
     font-variant-numeric: tabular-nums;
     min-height: 100vh;
   }
-  .wrap { max-width: 980px; margin: 0 auto; padding: 28px 20px 80px; }
+  .wrap { max-width: 1140px; margin: 0 auto; padding: 28px 20px 80px; }
 
   /* Header */
   header.top {
@@ -192,6 +192,32 @@
   tr.should-start td.slot { color: var(--win); opacity: 0.85; }
 
   .placeholder { color: var(--text-muted); font-size: 14px; padding: 30px 0; text-align: center; }
+
+  /* Wide tables (Standings Comparison, Position Breakdown, Weekly Scoring) */
+  .table-scroll { overflow-x: auto; }
+  .table-scroll table { min-width: 640px; }
+
+  /* Streaks / luck index colors */
+  .streak-w { color: var(--win); font-weight: 700; }
+  .streak-l { color: var(--loss); font-weight: 700; }
+  .streak-t { color: var(--tie); font-weight: 700; }
+  .luck-pos { color: var(--win); }
+  .luck-neg { color: var(--loss); }
+  .luck-zero { color: var(--text-muted); }
+
+  /* Sortable table headers */
+  th.sortable { cursor: pointer; user-select: none; }
+  th.sortable:hover { color: var(--text); }
+
+  /* Compact side-by-side tables (Weekly High/Low Scorers) */
+  .compact-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+  @media (max-width: 640px) { .compact-grid { grid-template-columns: 1fr; } }
+  .compact-grid table th, .compact-grid table td { font-size: 12.5px; padding: 6px 8px; }
+  .compact-label { font-size: 12.5px; font-weight: 700; margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.05em; }
+
+  /* Tight, dense table (Weekly Scoring — many week columns) */
+  .tight-table th, .tight-table td { font-size: 12px; padding: 5px 7px; white-space: nowrap; }
+  .tight-table td.team, .tight-table th:first-child { white-space: normal; }
 </style>
 </head>
 <body>
@@ -215,11 +241,13 @@
       <button data-tab="standings" class="active">Standings</button>
       <button data-tab="matchups">Matchups</button>
       <button data-tab="boxscore">Box Score</button>
+      <button data-tab="teamcompare">Team Comparison</button>
     </nav>
 
     <div id="view-standings" class="view active"></div>
     <div id="view-matchups" class="view"></div>
     <div id="view-boxscore" class="view"></div>
+    <div id="view-teamcompare" class="view"></div>
   </div>
 </div>
 
@@ -386,6 +414,16 @@ function computeWeeklyHighScores() {
     .sort((a, b) => a.week - b.week);
 }
 
+function computeWeeklyLowScores() {
+  return Object.entries(WEEKLY)
+    .filter(([wk, scores]) => scores.length > 0)
+    .map(([wk, scores]) => {
+      const bottom = scores.reduce((a, b) => (b.points < a.points ? b : a));
+      return { week: Number(wk), teamId: bottom.teamId, name: teamName(TEAMS[bottom.teamId]), points: bottom.points };
+    })
+    .sort((a, b) => a.week - b.week);
+}
+
 function computeMoneyTracker(champCheckboxChecked) {
   const highScores = computeWeeklyHighScores();
   const weeklyWinCounts = {};
@@ -524,10 +562,92 @@ function recordMap(list) {
   return map;
 }
 
+// Per-team, per-week actual result (W/L/T), completed weeks only, in
+// chronological order -- used to compute current streaks.
+function buildTeamWeeklyResults() {
+  const results = {};
+  Object.keys(TEAMS).forEach(id => { results[id] = []; });
+  const weeks = Object.keys(MATCHUPS_BY_WEEK).map(Number).sort((a, b) => a - b);
+  weeks.forEach(week => {
+    if (!WEEKLY[week] || WEEKLY[week].length === 0) return; // only completed weeks
+    (MATCHUPS_BY_WEEK[week] || []).forEach(m => {
+      if (m.awayScore === null || m.awayId === null) return; // bye week
+      const homeRes = m.homeScore > m.awayScore ? 'W' : (m.homeScore < m.awayScore ? 'L' : 'T');
+      const awayRes = m.awayScore > m.homeScore ? 'W' : (m.awayScore < m.homeScore ? 'L' : 'T');
+      if (!results[m.homeId]) results[m.homeId] = [];
+      if (!results[m.awayId]) results[m.awayId] = [];
+      results[m.homeId].push({ week, result: homeRes });
+      results[m.awayId].push({ week, result: awayRes });
+    });
+  });
+  return results;
+}
+
+function formatStreak(resultsArr) {
+  if (!resultsArr || resultsArr.length === 0) return { label: '—', cls: '' };
+  const sorted = [...resultsArr].sort((a, b) => a.week - b.week);
+  const last = sorted[sorted.length - 1].result;
+  let count = 0;
+  for (let i = sorted.length - 1; i >= 0; i--) {
+    if (sorted[i].result === last) count++;
+    else break;
+  }
+  const cls = last === 'W' ? 'streak-w' : last === 'L' ? 'streak-l' : 'streak-t';
+  return { label: `${last}${count}`, cls };
+}
+
+function streakMap() {
+  const results = buildTeamWeeklyResults();
+  const map = {};
+  Object.entries(results).forEach(([id, arr]) => { map[id] = formatStreak(arr); });
+  return map;
+}
+
+// Luck Index: actual wins minus median wins. Positive = winning more than
+// their scoring alone would predict; negative = the reverse.
+function luckIndexMap(standard, med) {
+  const medById = {};
+  med.forEach(t => { medById[t.id] = t; });
+  const map = {};
+  standard.forEach(t => {
+    const m = medById[t.id];
+    map[t.id] = m ? (t.wins - m.wins) : 0;
+  });
+  return map;
+}
+
+// Manager Efficiency %: actual points scored / optimal lineup points, over
+// completed weeks only (both standard.pf and whatIf.pf are already scoped
+// to completed weeks).
+function efficiencyMap(standard, whatIf) {
+  const whatIfById = {};
+  whatIf.forEach(t => { whatIfById[t.id] = t; });
+  const map = {};
+  standard.forEach(t => {
+    const w = whatIfById[t.id];
+    map[t.id] = (w && w.pf > 0) ? (t.pf / w.pf) * 100 : null;
+  });
+  return map;
+}
+
+// Cumulative Points Left on Bench: optimal points minus actual points,
+// summed across the season.
+function benchPointsMap(standard, whatIf) {
+  const whatIfById = {};
+  whatIf.forEach(t => { whatIfById[t.id] = t; });
+  const map = {};
+  standard.forEach(t => {
+    const w = whatIfById[t.id];
+    map[t.id] = w ? (w.pf - t.pf) : 0;
+  });
+  return map;
+}
+
 function renderStandings() {
   const standard = computeStandardStandings();
   const med = computeMedianStandings();
   const highScores = computeWeeklyHighScores();
+  const lowScores = computeWeeklyLowScores();
   const whatIf = computeWhatIfStandings();
   const medianWhatIf = computeMedianWhatIfStandings();
 
@@ -535,6 +655,10 @@ function renderStandings() {
   const medianRecords = recordMap(med);
   const whatIfRecords = recordMap(whatIf);
   const medianWhatIfRecords = recordMap(medianWhatIf);
+  const streaks = streakMap();
+  const luck = luckIndexMap(standard, med);
+  const efficiency = efficiencyMap(standard, whatIf);
+  const benchPts = benchPointsMap(standard, whatIf);
 
   const rowHtml = (t, i, extraCol) => `
     <tr class="${i === 0 ? 'rank1' : ''}">
@@ -544,6 +668,12 @@ function renderStandings() {
       <td class="num">${t.pf.toFixed(1)}</td>
       ${extraCol}
     </tr>`;
+
+  const luckCell = v => {
+    const cls = v > 0 ? 'luck-pos' : v < 0 ? 'luck-neg' : 'luck-zero';
+    const label = v > 0 ? `+${v}` : `${v}`;
+    return `<span class="${cls}">${label}</span>`;
+  };
 
   const html = `
     <section class="block">
@@ -557,20 +687,44 @@ function renderStandings() {
       </table>
     </section>
     <section class="block">
-      <h2>Weekly High Scorers</h2>
-      <p class="sub">Top scoring team each week — each win earns the $${WEEKLY_PRIZE} weekly prize</p>
-      <table>
-        <thead><tr><th class="num">Week</th><th>Team</th><th class="num">Points</th></tr></thead>
-        <tbody>
-          ${highScores.map(h => `<tr><td class="num">${h.week}</td><td class="team">${h.name}</td><td class="num">${h.points.toFixed(1)}</td></tr>`).join('') || '<tr><td colspan="3" class="placeholder">No completed weeks yet.</td></tr>'}
-        </tbody>
-      </table>
+      <h2>Weekly Extremes</h2>
+      <p class="sub">Highest and lowest scoring team each week — a High Score win earns the $${WEEKLY_PRIZE} weekly prize</p>
+      <div class="compact-grid">
+        <div>
+          <div class="compact-label" style="color:var(--win);">Highest Scorer</div>
+          <table>
+            <thead><tr><th class="num">Week</th><th>Team</th><th class="num">Points</th></tr></thead>
+            <tbody>
+              ${highScores.map(h => `<tr><td class="num">${h.week}</td><td class="team">${h.name}</td><td class="num">${h.points.toFixed(1)}</td></tr>`).join('') || '<tr><td colspan="3" class="placeholder">No completed weeks yet.</td></tr>'}
+            </tbody>
+          </table>
+        </div>
+        <div>
+          <div class="compact-label" style="color:var(--loss);">Lowest Scorer</div>
+          <table>
+            <thead><tr><th class="num">Week</th><th>Team</th><th class="num">Points</th></tr></thead>
+            <tbody>
+              ${lowScores.map(h => `<tr><td class="num">${h.week}</td><td class="team">${h.name}</td><td class="num">${h.points.toFixed(1)}</td></tr>`).join('') || '<tr><td colspan="3" class="placeholder">No completed weeks yet.</td></tr>'}
+            </tbody>
+          </table>
+        </div>
+      </div>
     </section>
     <section class="block">
       <h2>Standings Comparison</h2>
-      <p class="sub">Each team's record across every standings table</p>
+      <p class="sub">Each team's record across every standings table, plus season-long trend stats</p>
+      <p class="sub">
+        Win Streak reflects consecutive actual results, most recent first. Luck Index is actual wins minus median wins
+        (positive = winning more than their scoring alone would predict). Manager Efficiency % is actual points scored
+        ÷ optimal lineup points. Points Left on Bench is the season total of optimal minus actual scoring. All figures
+        only include completed weeks.
+      </p>
+      <div class="table-scroll">
       <table>
-        <thead><tr><th>Team</th><th class="num">Season</th><th class="num">Median</th><th class="num">What If</th><th class="num">Median What If</th></tr></thead>
+        <thead><tr>
+          <th>Team</th><th class="num">Season</th><th class="num">Median</th><th class="num">What If</th><th class="num">Median What If</th>
+          <th class="num">Win Streak</th><th class="num">Luck Index</th><th class="num">Manager Eff %</th><th class="num">Pts Left on Bench</th>
+        </tr></thead>
         <tbody>
           ${standard.map(t => `
             <tr>
@@ -579,9 +733,14 @@ function renderStandings() {
               <td class="num">${medianRecords[t.id] || '—'}</td>
               <td class="num">${whatIfRecords[t.id] || '—'}</td>
               <td class="num">${medianWhatIfRecords[t.id] || '—'}</td>
+              <td class="num"><span class="${(streaks[t.id] || {}).cls || ''}">${(streaks[t.id] || {}).label || '—'}</span></td>
+              <td class="num">${luckCell(luck[t.id] || 0)}</td>
+              <td class="num">${efficiency[t.id] !== null && efficiency[t.id] !== undefined ? efficiency[t.id].toFixed(1) + '%' : '—'}</td>
+              <td class="num">${benchPts[t.id] !== undefined ? benchPts[t.id].toFixed(1) : '—'}</td>
             </tr>`).join('')}
         </tbody>
       </table>
+      </div>
     </section>
     <section class="block">
       <h2>Median Standings</h2>
@@ -901,12 +1060,295 @@ function backToMatchups() {
   document.getElementById('view-matchups').classList.add('active');
 }
 
+// ---------- Team Comparison tab ----------
+
+const POSITION_LABELS = { QB: 'QB', RB: 'RB', WR: 'WR', TE: 'TE', K: 'K', DST: 'D/ST' };
+
+let weeklyScoringSort = { key: 'avg', dir: 'desc' };
+let positionBreakdownSort = { key: 'total', dir: 'desc' };
+
+// Aggregates each team's STARTED points by position group (actual position,
+// not lineup slot -- so a RB started at FLEX still counts under RB), across
+// all completed weeks.
+function computePositionBreakdown() {
+  const totals = {};
+  Object.keys(TEAMS).forEach(id => { totals[id] = { QB: 0, RB: 0, WR: 0, TE: 0, K: 0, DST: 0 }; });
+
+  const weeklyBox = (LEAGUE && LEAGUE.weeklyBoxscores) || {};
+  Object.entries(weeklyBox).forEach(([wk, matchups]) => {
+    const week = Number(wk);
+    if (!WEEKLY[week] || WEEKLY[week].length === 0) return; // only completed weeks
+    const real = (matchups || []).filter(m => m.matchupPeriodId === week);
+    real.forEach(m => {
+      [m.home, m.away].forEach(sideData => {
+        if (!sideData) return;
+        const teamId = sideData.teamId;
+        if (!totals[teamId]) totals[teamId] = { QB: 0, RB: 0, WR: 0, TE: 0, K: 0, DST: 0 };
+        const entries = getRosterEntries(sideData).filter(e => e.lineupSlotId !== 20 && e.lineupSlotId !== 21);
+        entries.forEach(e => {
+          const pos = getPositionGroup(e);
+          const pts = getPlayerPoints(e, week);
+          if (pos && totals[teamId][pos] !== undefined && pts !== null) {
+            totals[teamId][pos] += pts;
+          }
+        });
+      });
+    });
+  });
+
+  return Object.entries(totals).map(([id, positions]) => {
+    const total = Object.values(positions).reduce((a, b) => a + b, 0);
+    return { id, name: teamName(TEAMS[id]), positions, total };
+  }).sort((a, b) => b.total - a.total);
+}
+
+function computeWeeklyScoringTable() {
+  const weeks = Object.keys(WEEKLY).map(Number).sort((a, b) => a - b);
+  const rows = Object.keys(TEAMS).map(id => {
+    const scores = {};
+    weeks.forEach(w => {
+      const entry = (WEEKLY[w] || []).find(s => String(s.teamId) === String(id));
+      scores[w] = entry ? entry.points : null;
+    });
+    const played = weeks.filter(w => scores[w] !== null);
+    const avg = played.length ? played.reduce((sum, w) => sum + scores[w], 0) / played.length : null;
+    return { id, name: teamName(TEAMS[id]), scores, avg };
+  });
+  return { weeks, rows };
+}
+
+function renderTeamComparisonTab() {
+  const container = document.getElementById('view-teamcompare');
+
+  container.innerHTML = `
+    <section class="block">
+      <h2>Weekly Scoring</h2>
+      <p class="sub">Actual points scored by each team, week over week — click a column header to sort</p>
+      <div id="weeklyScoringTableWrap"></div>
+    </section>
+    <section class="block">
+      <h2>Position Strength Breakdown</h2>
+      <p class="sub">Total started points by position group, and each group's share of the team's total scoring (completed weeks only) — click a column header to sort</p>
+      <div id="positionBreakdownTableWrap"></div>
+    </section>
+    <section class="block">
+      <h2>Roto Scoring by Position</h2>
+      <p class="sub">
+        Within each position, teams are ranked by total points and scored like rotisserie: the top team earns
+        ${Object.keys(TEAMS).length} points, the last-place team earns 1. Tied teams split the points those ranks would
+        otherwise earn — e.g. two teams tied for 1st each get the average of 1st and 2nd. Click a column header to sort.
+      </p>
+      <div id="rotoScoringTableWrap"></div>
+    </section>
+  `;
+
+  renderWeeklyScoringTable();
+  renderPositionBreakdownTable();
+  renderRotoScoringTable();
+}
+
+function renderPositionBreakdownTable() {
+  const breakdown = computePositionBreakdown();
+  const posKeys = Object.keys(POSITION_LABELS);
+  const key = positionBreakdownSort.key;
+  const dir = positionBreakdownSort.dir;
+
+  const sorted = [...breakdown].sort((a, b) => {
+    let av, bv;
+    if (key === 'name') { av = a.name; bv = b.name; }
+    else if (key === 'total') { av = a.total; bv = b.total; }
+    else { av = a.positions[key] || 0; bv = b.positions[key] || 0; }
+    if (typeof av === 'string') return dir === 'asc' ? av.localeCompare(bv) : bv.localeCompare(av);
+    return dir === 'asc' ? av - bv : bv - av;
+  });
+
+  const arrow = k => positionBreakdownSort.key === k ? (positionBreakdownSort.dir === 'asc' ? ' \u25B2' : ' \u25BC') : '';
+
+  const wrap = document.getElementById('positionBreakdownTableWrap');
+  if (!wrap) return;
+  wrap.innerHTML = `
+    <div class="table-scroll">
+    <table>
+      <thead><tr>
+        <th class="sortable" onclick="setPositionBreakdownSort('name')">Team${arrow('name')}</th>
+        ${posKeys.map(k => `<th class="num sortable" onclick="setPositionBreakdownSort('${k}')">${POSITION_LABELS[k]}${arrow(k)}</th>`).join('')}
+        <th class="num sortable" onclick="setPositionBreakdownSort('total')">Total${arrow('total')}</th>
+      </tr></thead>
+      <tbody>
+        ${sorted.map(t => `
+          <tr>
+            <td class="team">${t.name}</td>
+            ${posKeys.map(k => {
+              const pts = t.positions[k] || 0;
+              const pct = t.total > 0 ? (pts / t.total) * 100 : 0;
+              return `<td class="num">${pts.toFixed(1)} <span style="color:var(--text-muted); font-size:11px;">(${pct.toFixed(0)}%)</span></td>`;
+            }).join('')}
+            <td class="num">${t.total.toFixed(1)}</td>
+          </tr>`).join('') || `<tr><td colspan="${posKeys.length + 2}" class="placeholder">No box score data yet.</td></tr>`}
+      </tbody>
+    </table>
+    </div>
+  `;
+}
+
+function setPositionBreakdownSort(key) {
+  if (positionBreakdownSort.key === key) {
+    positionBreakdownSort.dir = positionBreakdownSort.dir === 'asc' ? 'desc' : 'asc';
+  } else {
+    positionBreakdownSort.key = key;
+    positionBreakdownSort.dir = key === 'name' ? 'asc' : 'desc';
+  }
+  renderPositionBreakdownTable();
+}
+
+// Rotisserie-style scoring: within each position, the team with the most
+// total points earns N points (N = number of teams), next earns N-1, down
+// to 1 for last place. Teams tied at a position split the points those tied
+// ranks would otherwise earn -- e.g. with 12 teams, two teams tied for the
+// top spot (which would earn 12 and 11) each get 11.5, and the next team
+// still gets 10 (3rd place, unaffected by the tie above it).
+function computeRotoScoring() {
+  const breakdown = computePositionBreakdown();
+  const posKeys = Object.keys(POSITION_LABELS);
+  const N = breakdown.length;
+
+  const rotoByTeam = {};
+  breakdown.forEach(t => { rotoByTeam[t.id] = { id: t.id, name: t.name }; });
+
+  posKeys.forEach(pos => {
+    const sortedByPos = [...breakdown].sort((a, b) => (b.positions[pos] || 0) - (a.positions[pos] || 0));
+    let i = 0;
+    while (i < sortedByPos.length) {
+      let j = i;
+      while (j + 1 < sortedByPos.length && (sortedByPos[j + 1].positions[pos] || 0) === (sortedByPos[i].positions[pos] || 0)) j++;
+      // ranks i+1..j+1 (1-indexed) are tied; average them
+      let rankSum = 0;
+      for (let r = i + 1; r <= j + 1; r++) rankSum += r;
+      const avgRank = rankSum / (j - i + 1);
+      const points = N - avgRank + 1;
+      for (let k = i; k <= j; k++) {
+        rotoByTeam[sortedByPos[k].id][pos] = points;
+      }
+      i = j + 1;
+    }
+  });
+
+  Object.values(rotoByTeam).forEach(t => {
+    t.total = posKeys.reduce((sum, pos) => sum + (t[pos] || 0), 0);
+  });
+
+  return { rows: Object.values(rotoByTeam), teamsCount: N };
+}
+
+let rotoScoringSort = { key: 'total', dir: 'desc' };
+
+function renderRotoScoringTable() {
+  const { rows, teamsCount } = computeRotoScoring();
+  const posKeys = Object.keys(POSITION_LABELS);
+  const key = rotoScoringSort.key;
+  const dir = rotoScoringSort.dir;
+
+  const sorted = [...rows].sort((a, b) => {
+    let av, bv;
+    if (key === 'name') { av = a.name; bv = b.name; }
+    else { av = a[key] || 0; bv = b[key] || 0; }
+    if (typeof av === 'string') return dir === 'asc' ? av.localeCompare(bv) : bv.localeCompare(av);
+    return dir === 'asc' ? av - bv : bv - av;
+  });
+
+  const arrow = k => rotoScoringSort.key === k ? (rotoScoringSort.dir === 'asc' ? ' \u25B2' : ' \u25BC') : '';
+  const fmt = v => (v === undefined || v === null) ? '—' : (Number.isInteger(v) ? `${v}` : v.toFixed(1));
+
+  const wrap = document.getElementById('rotoScoringTableWrap');
+  if (!wrap) return;
+  wrap.innerHTML = `
+    <div class="table-scroll">
+    <table>
+      <thead><tr>
+        <th class="sortable" onclick="setRotoScoringSort('name')">Team${arrow('name')}</th>
+        ${posKeys.map(k => `<th class="num sortable" onclick="setRotoScoringSort('${k}')">${POSITION_LABELS[k]}${arrow(k)}</th>`).join('')}
+        <th class="num sortable" onclick="setRotoScoringSort('total')">Total${arrow('total')}</th>
+      </tr></thead>
+      <tbody>
+        ${sorted.map((t, i) => `
+          <tr class="${i === 0 ? 'rank1' : ''}">
+            <td class="team">${t.name}</td>
+            ${posKeys.map(k => `<td class="num">${fmt(t[k])}</td>`).join('')}
+            <td class="num">${fmt(t.total)}</td>
+          </tr>`).join('') || `<tr><td colspan="${posKeys.length + 2}" class="placeholder">No box score data yet.</td></tr>`}
+      </tbody>
+    </table>
+    </div>
+  `;
+}
+
+function setRotoScoringSort(key) {
+  if (rotoScoringSort.key === key) {
+    rotoScoringSort.dir = rotoScoringSort.dir === 'asc' ? 'desc' : 'asc';
+  } else {
+    rotoScoringSort.key = key;
+    rotoScoringSort.dir = key === 'name' ? 'asc' : 'desc';
+  }
+  renderRotoScoringTable();
+}
+
+
+function renderWeeklyScoringTable() {
+  const { weeks, rows } = computeWeeklyScoringTable();
+  const key = weeklyScoringSort.key;
+  const dir = weeklyScoringSort.dir;
+
+  const sorted = [...rows].sort((a, b) => {
+    let av, bv;
+    if (key === 'name') { av = a.name; bv = b.name; }
+    else if (key === 'avg') { av = a.avg ?? -Infinity; bv = b.avg ?? -Infinity; }
+    else { av = a.scores[key] ?? -Infinity; bv = b.scores[key] ?? -Infinity; }
+    if (typeof av === 'string') return dir === 'asc' ? av.localeCompare(bv) : bv.localeCompare(av);
+    return dir === 'asc' ? av - bv : bv - av;
+  });
+
+  const arrow = k => weeklyScoringSort.key === k ? (weeklyScoringSort.dir === 'asc' ? ' \u25B2' : ' \u25BC') : '';
+
+  const wrap = document.getElementById('weeklyScoringTableWrap');
+  if (!wrap) return;
+  wrap.innerHTML = `
+    <div class="table-scroll">
+    <table class="tight-table">
+      <thead><tr>
+        <th class="sortable" onclick="setWeeklyScoringSort('name')">Team${arrow('name')}</th>
+        <th class="num sortable" onclick="setWeeklyScoringSort('avg')">Avg${arrow('avg')}</th>
+        ${weeks.map(w => `<th class="num sortable" onclick="setWeeklyScoringSort(${w})">Wk ${w}${arrow(w)}</th>`).join('')}
+      </tr></thead>
+      <tbody>
+        ${sorted.map(r => `
+          <tr>
+            <td class="team">${r.name}</td>
+            <td class="num">${r.avg !== null ? r.avg.toFixed(1) : '—'}</td>
+            ${weeks.map(w => `<td class="num">${r.scores[w] !== null ? r.scores[w].toFixed(1) : '—'}</td>`).join('')}
+          </tr>`).join('') || `<tr><td colspan="${weeks.length + 2}" class="placeholder">No completed weeks yet.</td></tr>`}
+      </tbody>
+    </table>
+    </div>
+  `;
+}
+
+function setWeeklyScoringSort(key) {
+  if (weeklyScoringSort.key === key) {
+    weeklyScoringSort.dir = weeklyScoringSort.dir === 'asc' ? 'desc' : 'asc';
+  } else {
+    weeklyScoringSort.key = key;
+    weeklyScoringSort.dir = key === 'name' ? 'asc' : 'desc';
+  }
+  renderWeeklyScoringTable();
+}
+
 document.querySelectorAll('nav.tabs button').forEach(btn => {
   btn.addEventListener('click', () => {
     document.querySelectorAll('nav.tabs button').forEach(b => b.classList.remove('active'));
     btn.classList.add('active');
     document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
     document.getElementById('view-' + btn.dataset.tab).classList.add('active');
+    if (btn.dataset.tab === 'teamcompare') renderTeamComparisonTab();
   });
 });
 </script>
