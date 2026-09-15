@@ -432,6 +432,28 @@ function renderMoneyTable(champCheckboxChecked) {
   `;
 }
 
+// ESPN's mBoxscore response for a given scoringPeriodId includes matchup
+// entries for the WHOLE season, not just that week -- so every consumer of
+// weeklyBoxscores must filter to m.matchupPeriodId === week, or unplayed
+// future weeks (all-zero scores) get counted as extra ties/games.
+function buildOptimalWeeklyScores() {
+  const weeklyScores = {}; // week -> [{teamId, points}]
+  const weeklyBox = (LEAGUE && LEAGUE.weeklyBoxscores) || {};
+  Object.entries(weeklyBox).forEach(([wk, matchups]) => {
+    const week = Number(wk);
+    const real = (matchups || []).filter(m => m.matchupPeriodId === week);
+    real.forEach(m => {
+      if (!m.home) return;
+      weeklyScores[week] = weeklyScores[week] || [];
+      weeklyScores[week].push({ teamId: m.home.teamId, points: computeOptimalScore(m.home, week) });
+      if (m.away) {
+        weeklyScores[week].push({ teamId: m.away.teamId, points: computeOptimalScore(m.away, week) });
+      }
+    });
+  });
+  return weeklyScores;
+}
+
 function computeWhatIfStandings() {
   const tally = {};
   Object.keys(TEAMS).forEach(id => { tally[id] = { wins: 0, losses: 0, ties: 0, pf: 0 }; });
@@ -439,7 +461,8 @@ function computeWhatIfStandings() {
   const weeklyBox = (LEAGUE && LEAGUE.weeklyBoxscores) || {};
   Object.entries(weeklyBox).forEach(([wk, matchups]) => {
     const week = Number(wk);
-    (matchups || []).forEach(m => {
+    const real = (matchups || []).filter(m => m.matchupPeriodId === week);
+    real.forEach(m => {
       if (!m.home) return;
       const homeId = m.home.teamId;
       const homeOpt = computeOptimalScore(m.home, week);
@@ -464,11 +487,34 @@ function computeWhatIfStandings() {
   })).sort((a, b) => b.wins - a.wins || b.pf - a.pf);
 }
 
+function computeMedianWhatIfStandings() {
+  const weeklyOptimal = buildOptimalWeeklyScores();
+  const tally = {};
+  Object.keys(TEAMS).forEach(id => { tally[id] = { wins: 0, losses: 0, ties: 0, pf: 0 }; });
+
+  Object.entries(weeklyOptimal).forEach(([wk, scores]) => {
+    if (scores.length < 2) return;
+    const med = median(scores.map(s => s.points));
+    scores.forEach(s => {
+      if (!tally[s.teamId]) tally[s.teamId] = { wins: 0, losses: 0, ties: 0, pf: 0 };
+      tally[s.teamId].pf += s.points;
+      if (s.points > med) tally[s.teamId].wins++;
+      else if (s.points < med) tally[s.teamId].losses++;
+      else tally[s.teamId].ties++;
+    });
+  });
+
+  return Object.entries(tally).map(([id, v]) => ({
+    id, name: teamName(TEAMS[id]), ...v
+  })).sort((a, b) => b.wins - a.wins || b.pf - a.pf);
+}
+
 function renderStandings() {
   const standard = computeStandardStandings();
   const med = computeMedianStandings();
   const highScores = computeWeeklyHighScores();
   const whatIf = computeWhatIfStandings();
+  const medianWhatIf = computeMedianWhatIfStandings();
 
   const rowHtml = (t, i, extraCol) => `
     <tr class="${i === 0 ? 'rank1' : ''}">
@@ -507,6 +553,16 @@ function renderStandings() {
         <thead><tr><th></th><th>Team</th><th class="num">What-If Record</th><th class="num">Optimal Points</th><th></th></tr></thead>
         <tbody>
           ${whatIf.map((t, i) => rowHtml(t, i, `<td></td>`)).join('') || '<tr><td colspan="4" class="placeholder">No box score data yet.</td></tr>'}
+        </tbody>
+      </table>
+    </section>
+    <section class="block">
+      <h2>Median What-If Standings</h2>
+      <p class="sub">Each week, optimal-lineup score above the 12-team median (of optimal scores) counts as a win; below counts as a loss</p>
+      <table>
+        <thead><tr><th></th><th>Team</th><th class="num">Median What-If Record</th><th class="num">Optimal Points</th><th></th></tr></thead>
+        <tbody>
+          ${medianWhatIf.map((t, i) => rowHtml(t, i, `<td></td>`)).join('') || '<tr><td colspan="4" class="placeholder">No box score data yet.</td></tr>'}
         </tbody>
       </table>
     </section>
@@ -598,9 +654,12 @@ function findBoxscoreMatchup(week, homeId, awayId) {
   if (wkData.length === 0) {
     console.warn(`No box score data at all for week ${week}. Available weeks:`, Object.keys(LEAGUE.weeklyBoxscores || {}));
   }
+  // ESPN's mBoxscore response includes the full season schedule, not just
+  // the requested week -- filter to matchupPeriodId === week so we don't
+  // accidentally grab a different week's matchup for the same team.
   const match = wkData.find(m =>
-    (m.home && m.home.teamId === homeId) ||
-    (m.away && m.away.teamId === awayId)
+    m.matchupPeriodId === week &&
+    ((m.home && m.home.teamId === homeId) || (m.away && m.away.teamId === awayId))
   );
   if (!match) {
     console.warn(`No matchup found for week ${week}, homeId ${homeId}, awayId ${awayId}. Week data:`, wkData);
