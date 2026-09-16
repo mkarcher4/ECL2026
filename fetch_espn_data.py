@@ -115,26 +115,24 @@ def fetch_season_player_stats(season):
     -derived totals instead -- this is a supplementary data source, not a
     required one, and its absence should never break the rest of the fetch.
     """
-    filters = {
-        "players": {
-            "limit": 3000,
-            "sortAppliedStatTotal": {
-                "sortAsc": False,
-                "sortPriority": 1,
-                "value": {"seasonId": season}
-            }
-        }
-    }
+    # Simplified filter -- just "give me every player up to this limit".
+    # The earlier version added a sortAppliedStatTotal clause that may not
+    # have matched what this endpoint expects and was causing a 400.
+    filters = {"players": {"limit": 3000}}
     headers = dict(HEADERS)
     headers["x-fantasy-filter"] = json.dumps(filters)
 
+    resp = None
     try:
         resp = requests.get(base_url(season), cookies=COOKIES, headers=headers,
                              params={"view": "kona_player_info"}, timeout=30)
         resp.raise_for_status()
         data = resp.json()
     except Exception as e:
-        print(f"  Could not fetch full player pool stats (falling back to box scores): {e}")
+        status = resp.status_code if resp is not None else "n/a"
+        body_snippet = resp.text[:300] if resp is not None else ""
+        print(f"  Could not fetch full player pool stats (status {status}: {e}); body: {body_snippet!r}")
+        print("  Falling back to box-score-derived player data.")
         return {}
 
     players = data.get("players", [])

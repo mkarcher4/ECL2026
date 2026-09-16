@@ -2009,6 +2009,26 @@ function computeFreeAgentOfferDates() {
 
 let faOfferDateFilter = null;
 
+// ESPN generates its own human-readable failure message (e.g. "Player has
+// already been added to another team") that the API doesn't expose --
+// only a status code. This maps the common codes to equivalent wording;
+// anything not in the map falls back to a cleaned-up version of the code
+// itself rather than a guess.
+const WAIVER_FAILURE_REASONS = {
+  FAILED_INVALIDPLAYERSOURCE: 'Player has already been added to another team.',
+  FAILED_ROSTER_INVALID: 'Roster would be invalid with this move.',
+  FAILED_BUDGET: 'Bid exceeded available FAAB budget.',
+  FAILED_ONTEAM: 'Player is already on this team.',
+  CANCELLED: 'Claim was cancelled.',
+  CANCELED: 'Claim was cancelled.'
+};
+
+function waiverFailureReason(status) {
+  if (!status) return 'Unknown reason.';
+  if (WAIVER_FAILURE_REASONS[status]) return WAIVER_FAILURE_REASONS[status];
+  return status.replace(/^FAILED_/, '').replace(/_/g, ' ').toLowerCase().replace(/^./, c => c.toUpperCase()) + '.';
+}
+
 function renderFreeAgentOffersReport() {
   const all = (LEAGUE && LEAGUE.transactions) || [];
   const dates = computeFreeAgentOfferDates();
@@ -2038,17 +2058,14 @@ function renderFreeAgentOffersReport() {
     if (successful) {
       const dropInfo = dropItem ? getPlayerNamePos(dropItem.playerId) : null;
       results = dropInfo
-        ? `Added. ${teamName(TEAMS[t.teamId])} dropped ${dropInfo.name}${dropInfo.pos ? ', ' + dropInfo.pos : ''} to Waivers.`
+        ? `Added. ${teamName(TEAMS[t.teamId])} dropped <strong>${dropInfo.name}</strong>${dropInfo.pos ? ', ' + dropInfo.pos : ''} to Waivers.`
         : 'Added.';
     } else {
-      // ESPN generates a specific human-readable failure reason (e.g. "player
-      // already added to another team") that the API doesn't expose directly
-      // -- showing the raw status here rather than guessing the wording.
-      results = `Unsuccessful. Reason: ${t.status || 'unknown'}.`;
+      results = `Unsuccessful. Reason: ${waiverFailureReason(t.status)}`;
     }
     return {
       team: teamName(TEAMS[t.teamId]),
-      claim: `${claim.name}${claim.pos ? ', ' + claim.pos : ''}`,
+      claim: `<strong>${claim.name}</strong>${claim.pos ? ', ' + claim.pos : ''}`,
       offer: (typeof t.bidAmount === 'number') ? `$${t.bidAmount}` : '—',
       results,
       successful
@@ -2066,7 +2083,7 @@ function renderFreeAgentOffersReport() {
             <td class="team">${r.team}</td>
             <td>${r.claim}</td>
             <td class="num">${r.offer}</td>
-            <td style="color:${r.successful ? 'var(--win)' : 'var(--loss)'}">${r.results}</td>
+            <td>${r.results}</td>
           </tr>`).join('') || '<tr><td colspan="5" class="placeholder">No offers processed this date.</td></tr>'}
       </tbody>
     </table>
@@ -2089,13 +2106,12 @@ function renderFaabBudgetTable() {
   if (!wrap) return;
   wrap.innerHTML = `
     <table>
-      <thead><tr><th class="num">Pos</th><th>Team</th><th>Manager(s)</th><th class="num">Budget</th></tr></thead>
+      <thead><tr><th class="num">Pos</th><th>Team</th><th class="num">Budget</th></tr></thead>
       <tbody>
         ${rows.map((r, i) => `
           <tr class="${i === 0 ? 'rank1' : ''}">
             <td class="num">${i + 1}</td>
             <td class="team">${r.name}</td>
-            <td>${r.manager}</td>
             <td class="num">${r.remaining !== null ? '$' + r.remaining : '—'}</td>
           </tr>`).join('')}
       </tbody>
