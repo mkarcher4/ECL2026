@@ -253,12 +253,14 @@
       <button data-tab="matchups">Matchups</button>
       <button data-tab="boxscore">Box Score</button>
       <button data-tab="teamcompare">Team Comparison</button>
+      <button data-tab="draftrecap">Draft Recap</button>
     </nav>
 
     <div id="view-standings" class="view active"></div>
     <div id="view-matchups" class="view"></div>
     <div id="view-boxscore" class="view"></div>
     <div id="view-teamcompare" class="view"></div>
+    <div id="view-draftrecap" class="view"></div>
   </div>
 </div>
 
@@ -1303,6 +1305,350 @@ function setRotoScoringSort(key) {
   renderRotoScoringTable();
 }
 
+// ---------- Draft Recap tab ----------
+// Methodology: for each drafted player, compare where they were taken among
+// others at their position (Draft Position Rank -- e.g. "3rd RB off the
+// board") to how they finished the season in points among all drafted
+// players at that position (Finish Position Rank). Grade = Draft Rank minus
+// Finish Rank: positive means they outperformed their draft slot (steal),
+// negative means they underperformed it (bust). Points totals include bench
+// scoring -- this grades the pick itself, not how the manager used it.
+//
+// Data limitation: a player's season points are built by scanning every
+// week's box score data for that player's id. A player who was drafted,
+// then dropped and never picked up by anyone else the rest of the season,
+// will have an incomplete point total (we only see rostered players) and
+// is flagged as such rather than silently graded on partial data.
+
+let draftPlayerInfoCache = null;
+
+// Maps a raw player object's position fields (from the full player-pool
+// fetch, not a box score entry) to our QB/RB/WR/TE/K/DST groups -- same
+// convention as getPositionGroup(), just operating on plain fields instead
+// of a roster entry.
+function positionGroupFromRaw(defaultPositionId, eligibleSlots) {
+  if (Array.isArray(eligibleSlots) && eligibleSlots.length) {
+    if (eligibleSlots.includes(0)) return 'QB';
+    if (eligibleSlots.includes(2)) return 'RB';
+    if (eligibleSlots.includes(4)) return 'WR';
+    if (eligibleSlots.includes(6)) return 'TE';
+    if (eligibleSlots.includes(16)) return 'DST';
+    if (eligibleSlots.includes(17)) return 'K';
+  }
+  const map = { 1: 'QB', 2: 'RB', 3: 'WR', 4: 'TE', 5: 'K', 16: 'DST' };
+  return map[defaultPositionId] || null;
+}
+
+// Fallback source: reconstructs each player's season total by scanning
+// every week's box score data for them. Only sees players while they're
+// actually on a roster somewhere -- a player who's dropped and never
+// picked up again for the rest of the season will show an incomplete
+// total here. Kept as a fallback for when the full player-pool fetch
+// (below) doesn't have an entry for someone.
+function buildBoxScorePlayerInfo() {
+  const info = {}; // playerId -> { name, pos, points }
+
+  const weeklyBox = (LEAGUE && LEAGUE.weeklyBoxscores) || {};
+  Object.entries(weeklyBox).forEach(([wk, matchups]) => {
+    const week = Number(wk);
+    if (!WEEKLY[week] || WEEKLY[week].length === 0) return; // only completed weeks
+    const real = (matchups || []).filter(m => m.matchupPeriodId === week);
+    real.forEach(m => {
+      [m.home, m.away].forEach(sideData => {
+        if (!sideData) return;
+        getRosterEntries(sideData).forEach(e => {
+          const player = getPlayer(e);
+          if (!player || player.id === undefined) return;
+          const pts = getPlayerPoints(e, week);
+          if (!info[player.id]) {
+            info[player.id] = { name: player.fullName || 'Unknown Player', pos: getPositionGroup(e), points: 0 };
+          }
+          if (pts !== null) info[player.id].points += pts;
+        });
+      });
+    });
+  });
+
+  return info;
+}
+
+// Preferred source: ESPN's full player-pool fetch (seasonPlayerStats in the
+// synced JSON) covers every rosterable player league-wide, including ones
+// nobody currently owns -- so a player who was dropped and never picked up
+// again still has a correct, complete season total here. This is what
+// solves the box-score method's blind spot. Falls back to the box-score
+// -derived value for any player missing from the pool fetch (e.g. an older
+// synced JSON that predates this feature, or a player the pool fetch
+// simply didn't return), so this never regresses below the old behavior.
+function buildDraftPlayerInfo() {
+  if (draftPlayerInfoCache) return draftPlayerInfoCache;
+
+  const boxScoreInfo = buildBoxScorePlayerInfo();
+  const seasonStats = (LEAGUE && LEAGUE.seasonPlayerStats) || {};
+
+  const info = {};
+  Object.entries(boxScoreInfo).forEach(([pid, v]) => {
+    info[pid] = { name: v.name, pos: v.pos, points: v.points, source: 'boxscore' };
+  });
+
+  Object.entries(seasonStats).forEach(([pid, v]) => {
+    if (v.points === null || v.points === undefined) return; // no usable total; keep box-score fallback
+    const existing = info[pid];
+    info[pid] = {
+      name: v.name || (existing && existing.name) || 'Unknown Player',
+      pos: positionGroupFromRaw(v.defaultPositionId, v.eligibleSlots) || (existing && existing.pos) || null,
+      points: v.points,
+      source: 'seasonPool'
+    };
+  });
+
+  draftPlayerInfoCache = info;
+  return info;
+}
+
+function computeDraftRecap() {
+  const picks = ((LEAGUE && LEAGUE.draftPicks) || []).slice();
+  if (picks.length === 0) return [];
+
+  const playerInfo = buildDraftPlayerInfo();
+  const teamsCount = Object.keys(TEAMS).length;
+
+  const enriched = picks.map(p => {
+    const overall = p.overallPickNumber || ((p.roundId - 1) * teamsCount + p.roundPickNumber);
+    const info = playerInfo[p.playerId];
+    return {
+      overall,
+      round: p.roundId,
+      roundPick: p.roundPickNumber,
+      teamId: p.teamId,
+      teamName: teamName(TEAMS[p.teamId]),
+      playerId: p.playerId,
+      playerName: info ? info.name : 'Unknown Player',
+      pos: info ? info.pos : null,
+      points: info ? info.points : null,
+      dataIncomplete: !info
+    };
+  }).sort((a, b) => a.overall - b.overall);
+
+  // Rank within each position: draft order (by overall pick) vs. finish (by points)
+  const posGroups = {};
+  enriched.forEach(p => {
+    if (!p.pos) return;
+    posGroups[p.pos] = posGroups[p.pos] || [];
+    posGroups[p.pos].push(p);
+  });
+
+  Object.entries(posGroups).forEach(([pos, group]) => {
+    const byDraft = [...group].sort((a, b) => a.overall - b.overall);
+    byDraft.forEach((p, i) => { p.draftPosRank = i + 1; });
+
+    const byFinish = [...group].sort((a, b) => (b.points || 0) - (a.points || 0));
+    byFinish.forEach((p, i) => { p.finishPosRank = i + 1; });
+  });
+
+  enriched.forEach(p => {
+    p.grade = (p.draftPosRank && p.finishPosRank) ? (p.draftPosRank - p.finishPosRank) : null;
+  });
+
+  // Weighted Grade: accounts for BOTH round drafted and the fact that raw
+  // points aren't comparable across positions (e.g. the best TE that year
+  // might score about the same raw points as a middling QB or WR, but that
+  // TE total is exceptional for the position while the QB/WR total is not).
+  //
+  // 1. Within each position, convert points to a z-score against that
+  //    position's own mean/stdev (drafted players only) -- this puts every
+  //    position on the same normalized scale.
+  // 2. Within each ROUND, average those z-scores across all positions to
+  //    get "what a pick in this round was expected to return."
+  // 3. Weighted Grade = player's z-score minus their round's expected
+  //    z-score. Positive = outperformed the bar for that round once
+  //    position scale is accounted for; negative = underperformed it.
+  Object.values(posGroups).forEach(group => {
+    const pts = group.map(p => p.points).filter(v => v !== null && v !== undefined);
+    if (pts.length === 0) return;
+    const mean = pts.reduce((a, b) => a + b, 0) / pts.length;
+    const variance = pts.length > 1
+      ? pts.reduce((sum, v) => sum + Math.pow(v - mean, 2), 0) / (pts.length - 1)
+      : 0;
+    const stdev = Math.sqrt(variance);
+    group.forEach(p => {
+      if (p.points === null || p.points === undefined) { p.zScore = null; return; }
+      p.zScore = stdev > 0 ? (p.points - mean) / stdev : 0;
+    });
+  });
+
+  const roundGroups = {};
+  enriched.forEach(p => {
+    if (p.zScore === null || p.zScore === undefined) return;
+    roundGroups[p.round] = roundGroups[p.round] || [];
+    roundGroups[p.round].push(p.zScore);
+  });
+  const roundExpectedZ = {};
+  Object.entries(roundGroups).forEach(([round, zScores]) => {
+    roundExpectedZ[round] = zScores.reduce((a, b) => a + b, 0) / zScores.length;
+  });
+
+  enriched.forEach(p => {
+    if (p.zScore === null || p.zScore === undefined || roundExpectedZ[p.round] === undefined) {
+      p.weightedGrade = null;
+    } else {
+      p.weightedGrade = p.zScore - roundExpectedZ[p.round];
+    }
+  });
+
+  return enriched;
+}
+
+let draftRecapSort = { key: 'overall', dir: 'asc' };
+let draftRecapFilters = { team: 'all', pos: 'all' };
+let draftRecapAllPicks = [];
+
+function renderDraftRecapTab() {
+  const container = document.getElementById('view-draftrecap');
+  const picks = computeDraftRecap();
+  draftRecapAllPicks = picks;
+
+  if (picks.length === 0) {
+    container.innerHTML = `
+      <section class="block">
+        <h2>Draft Recap</h2>
+        <p class="placeholder">No draft data found. Make sure the sync script has fetched this season's draft.</p>
+      </section>
+    `;
+    return;
+  }
+
+  const teamIds = Object.keys(TEAMS);
+  const positions = [...new Set(picks.map(p => p.pos).filter(Boolean))].sort();
+
+  container.innerHTML = `
+    <section class="block">
+      <h2>Draft Recap</h2>
+      <p class="sub">
+        Position Grade compares where a player was taken among others at their position (Draft Position Rank) to how
+        they finished the season in total points among all drafted players at that position (Finish Position Rank).
+        Positive = steal, negative = bust.
+      </p>
+      <p class="sub">
+        Weighted Grade accounts for round drafted and for positions scoring on very different scales -- e.g. the
+        best TE in a season might score about the same raw points as a middling QB or WR, but that total is
+        exceptional for a TE and unremarkable for a QB. Each player's points are converted to a z-score against
+        others at their own position, then compared to the average z-score of everyone taken in that same round.
+        Positive = beat the bar for that round once position scale is accounted for; negative = fell short of it.
+      </p>
+      <p class="sub">
+        Both use total season points including bench scoring, since this grades the pick itself, not how it was
+        managed. Season totals come from ESPN's full player pool, so they're accurate even for players who were
+        dropped and never picked up again; a pick is only marked "incomplete" in the rare case that data isn't
+        available either. Click a column header to sort.
+      </p>
+      <div class="h2h-picker">
+        <select id="draftRecapTeamFilter">
+          <option value="all">All Teams</option>
+          ${teamIds.map(id => `<option value="${id}">${teamName(TEAMS[id])}</option>`).join('')}
+        </select>
+        <select id="draftRecapPosFilter">
+          <option value="all">All Positions</option>
+          ${positions.map(p => `<option value="${p}">${p}</option>`).join('')}
+        </select>
+      </div>
+      <div id="draftRecapTableWrap"></div>
+    </section>
+  `;
+
+  const teamSel = document.getElementById('draftRecapTeamFilter');
+  const posSel = document.getElementById('draftRecapPosFilter');
+  teamSel.value = draftRecapFilters.team;
+  posSel.value = draftRecapFilters.pos;
+  teamSel.addEventListener('change', () => {
+    draftRecapFilters.team = teamSel.value;
+    renderDraftRecapTable(applyDraftRecapFilters(draftRecapAllPicks));
+  });
+  posSel.addEventListener('change', () => {
+    draftRecapFilters.pos = posSel.value;
+    renderDraftRecapTable(applyDraftRecapFilters(draftRecapAllPicks));
+  });
+
+  renderDraftRecapTable(applyDraftRecapFilters(picks));
+}
+
+function applyDraftRecapFilters(picks) {
+  return picks.filter(p => {
+    if (draftRecapFilters.team !== 'all' && String(p.teamId) !== String(draftRecapFilters.team)) return false;
+    if (draftRecapFilters.pos !== 'all' && p.pos !== draftRecapFilters.pos) return false;
+    return true;
+  });
+}
+
+function renderDraftRecapTable(picks) {
+  const key = draftRecapSort.key;
+  const dir = draftRecapSort.dir;
+
+  const sorted = [...picks].sort((a, b) => {
+    let av = a[key], bv = b[key];
+    if (av === null || av === undefined) av = dir === 'asc' ? Infinity : -Infinity;
+    if (bv === null || bv === undefined) bv = dir === 'asc' ? Infinity : -Infinity;
+    if (typeof av === 'string') return dir === 'asc' ? av.localeCompare(bv) : bv.localeCompare(av);
+    return dir === 'asc' ? av - bv : bv - av;
+  });
+
+  const arrow = k => draftRecapSort.key === k ? (draftRecapSort.dir === 'asc' ? ' \u25B2' : ' \u25BC') : '';
+  const col = (k, label) => `<th class="num sortable" onclick="setDraftRecapSort('${k}')">${label}${arrow(k)}</th>`;
+
+  const wrap = document.getElementById('draftRecapTableWrap');
+  if (!wrap) return;
+  wrap.innerHTML = `
+    <div class="table-scroll">
+    <table class="tight-table">
+      <thead><tr>
+        ${col('round', 'Rd')}
+        ${col('overall', 'Pick')}
+        <th class="sortable" onclick="setDraftRecapSort('teamName')">Team${arrow('teamName')}</th>
+        <th class="sortable" onclick="setDraftRecapSort('playerName')">Player${arrow('playerName')}</th>
+        <th class="sortable" onclick="setDraftRecapSort('pos')">Pos${arrow('pos')}</th>
+        ${col('points', 'Points')}
+        ${col('draftPosRank', 'Draft Rank')}
+        ${col('finishPosRank', 'Finish Rank')}
+        ${col('grade', 'Position Grade')}
+        ${col('weightedGrade', 'Weighted Grade')}
+      </tr></thead>
+      <tbody>
+        ${sorted.map(p => {
+          const gradeColor = p.grade === null ? 'var(--text-muted)' : p.grade > 0 ? 'var(--win)' : p.grade < 0 ? 'var(--loss)' : 'var(--text-muted)';
+          const gradeLabel = p.grade === null ? '—' : (p.grade > 0 ? `+${p.grade}` : `${p.grade}`);
+          const wg = p.weightedGrade;
+          const wgColor = wg === null || wg === undefined ? 'var(--text-muted)' : wg > 0 ? 'var(--win)' : wg < 0 ? 'var(--loss)' : 'var(--text-muted)';
+          const wgLabel = wg === null || wg === undefined ? '—' : (wg > 0 ? `+${wg.toFixed(2)}` : wg.toFixed(2));
+          return `
+          <tr>
+            <td class="num">${p.round}</td>
+            <td class="num">${p.overall}</td>
+            <td class="team">${p.teamName}</td>
+            <td>${p.playerName}${p.dataIncomplete ? ' <span style="color:var(--text-muted); font-size:11px;">(incomplete)</span>' : ''}</td>
+            <td class="num">${p.pos || '—'}</td>
+            <td class="num">${p.points !== null ? p.points.toFixed(1) : '—'}</td>
+            <td class="num">${p.draftPosRank ? p.pos + p.draftPosRank : '—'}</td>
+            <td class="num">${p.finishPosRank ? p.pos + p.finishPosRank : '—'}</td>
+            <td class="num" style="color:${gradeColor}; font-weight:700;">${gradeLabel}</td>
+            <td class="num" style="color:${wgColor}; font-weight:700;">${wgLabel}</td>
+          </tr>`;
+        }).join('') || '<tr><td colspan="10" class="placeholder">No picks match this filter.</td></tr>'}
+      </tbody>
+    </table>
+    </div>
+  `;
+}
+
+function setDraftRecapSort(key) {
+  if (draftRecapSort.key === key) {
+    draftRecapSort.dir = draftRecapSort.dir === 'asc' ? 'desc' : 'asc';
+  } else {
+    draftRecapSort.key = key;
+    draftRecapSort.dir = (key === 'teamName' || key === 'playerName' || key === 'pos') ? 'asc' : 'desc';
+  }
+  renderDraftRecapTable(applyDraftRecapFilters(draftRecapAllPicks));
+}
+
 
 function renderWeeklyScoringTable() {
   const { weeks, rows } = computeWeeklyScoringTable();
@@ -1360,6 +1706,7 @@ document.querySelectorAll('nav.tabs button').forEach(btn => {
     document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
     document.getElementById('view-' + btn.dataset.tab).classList.add('active');
     if (btn.dataset.tab === 'teamcompare') renderTeamComparisonTab();
+    if (btn.dataset.tab === 'draftrecap') renderDraftRecapTab();
   });
 });
 </script>
