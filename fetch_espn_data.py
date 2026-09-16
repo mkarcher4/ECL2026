@@ -59,15 +59,24 @@ def discover_available_seasons():
     history older than 2018 may need additional handling -- if very old
     seasons don't show up, that's the likely reason.
     """
-    url = f"https://fantasy.espn.com/apis/v3/games/ffl/leagueHistory/{LEAGUE_ID}"
+    # Same working domain as every other request in this script -- the
+    # plain fantasy.espn.com domain does not reliably return raw JSON for
+    # this endpoint.
+    url = f"https://lm-api-reads.fantasy.espn.com/apis/v3/games/ffl/leagueHistory/{LEAGUE_ID}"
     current_year = datetime.date.today().year
 
+    resp = None
     try:
         resp = requests.get(url, cookies=COOKIES, headers=HEADERS, timeout=20)
         resp.raise_for_status()
         data = resp.json()
     except Exception as e:
-        print(f"Could not discover league history ({e}); falling back to current year only.")
+        # Print status code + a snippet of the raw body so a future failure
+        # is diagnosable straight from the Action log without guessing.
+        status = resp.status_code if resp is not None else "n/a"
+        body_snippet = resp.text[:200] if resp is not None else ""
+        print(f"Could not discover league history (status {status}: {e}); body: {body_snippet!r}")
+        print("Falling back to current year only.")
         return [current_year]
 
     entries = data if isinstance(data, list) else [data]
@@ -152,6 +161,59 @@ def fetch_season_player_stats(season):
     return result
 
 
+def trim_player_entry(e):
+    """
+    Keeps only the fields the app actually reads from a roster entry, and
+    drops the rest -- ESPN's raw player objects carry a large per-category
+    stats[] array (weekly breakdowns of every stat type, for both actual and
+    projected sources) plus ownership%, ADP, injury notes, headshots, etc.
+    that this app never uses. That stats[] array in particular is the single
+    biggest contributor to file size once you're pulling many weeks across
+    many seasons, since it's repeated in full for every player, every week.
+    """
+    ppe = e.get("playerPoolEntry") or {}
+    player = ppe.get("player") or e.get("player") or {}
+    applied = ppe.get("appliedStatTotal")
+    if applied is None:
+        applied = e.get("appliedStatTotal")
+    return {
+        "lineupSlotId": e.get("lineupSlotId"),
+        "playerPoolEntry": {
+            "appliedStatTotal": applied,
+            "player": {
+                "id": player.get("id"),
+                "fullName": player.get("fullName"),
+                "defaultPositionId": player.get("defaultPositionId"),
+                "eligibleSlots": player.get("eligibleSlots"),
+            }
+        }
+    }
+
+
+def trim_side(side):
+    if not side:
+        return side
+    roster = (side.get("rosterForCurrentScoringPeriod")
+              or side.get("rosterForMatchupPeriod")
+              or side.get("roster") or {})
+    entries = roster.get("entries", [])
+    return {
+        "teamId": side.get("teamId"),
+        "totalPoints": side.get("totalPoints"),
+        "rosterForCurrentScoringPeriod": {
+            "entries": [trim_player_entry(e) for e in entries]
+        }
+    }
+
+
+def trim_matchup(m):
+    return {
+        "matchupPeriodId": m.get("matchupPeriodId"),
+        "home": trim_side(m.get("home")),
+        "away": trim_side(m.get("away")) if m.get("away") else None,
+    }
+
+
 def fetch_season_data(season):
     """Fetches one full season's worth of league data (the same shape the
     app has always expected) and returns it as a dict."""
@@ -175,7 +237,7 @@ def fetch_season_data(season):
         try:
             wk_data = get(season, ["mBoxscore", "mMatchupScore"], extra_params={"scoringPeriodId": wk})
             wk_schedule = wk_data.get("schedule", [])
-            weekly_boxscores[str(wk)] = wk_schedule
+            weekly_boxscores[str(wk)] = [trim_matchup(m) for m in wk_schedule]
             print(f"  Week {wk}: {len(wk_schedule)} matchup(s) in box score data")
         except requests.HTTPError as e:
             print(f"  Skipped week {wk}: {e}")
@@ -213,9 +275,15 @@ def main():
     }
 
     with open(OUTPUT_FILE, "w") as f:
-        json.dump(output, f)
+        json.dump(output, f, separators=(",", ":"))  # compact -- no extra whitespace
 
+    size_mb = os.path.getsize(OUTPUT_FILE) / (1024 * 1024)
     print(f"Saved {OUTPUT_FILE} with {len(seasons_data)} season(s): {list(seasons_data.keys())}")
+    print(f"File size: {size_mb:.1f} MB")
+    if size_mb > 90:
+        print(f"WARNING: {size_mb:.1f} MB is close to or over GitHub's 100 MB file limit. "
+              f"The push may fail. Consider trimming the SEASONS this script covers, "
+              f"or ask for further data reduction.")
 
 
 if __name__ == "__main__":
