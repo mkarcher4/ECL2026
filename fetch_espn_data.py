@@ -115,10 +115,21 @@ def fetch_season_player_stats(season):
     -derived totals instead -- this is a supplementary data source, not a
     required one, and its absence should never break the rest of the fetch.
     """
-    # Simplified filter -- just "give me every player up to this limit".
-    # The earlier version added a sortAppliedStatTotal clause that may not
-    # have matched what this endpoint expects and was causing a 400.
-    filters = {"players": {"limit": 3000}}
+    # ESPN requires "limit" to be paired with a "sort" clause or it 400s
+    # with "Filter: Limit request must be accompanied by a sort" -- this
+    # sortDraftRanks shape is the standard, verified way to pull the full
+    # player pool (not just top scorers), used by established community
+    # ESPN fantasy API tools.
+    filters = {
+        "players": {
+            "limit": 3000,
+            "sortDraftRanks": {
+                "sortPriority": 100,
+                "sortAsc": True,
+                "value": "STANDARD"
+            }
+        }
+    }
     headers = dict(HEADERS)
     headers["x-fantasy-filter"] = json.dumps(filters)
 
