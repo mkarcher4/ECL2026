@@ -399,6 +399,14 @@ function buildWeeklyAndMatchups(data) {
   // behavior) rather than guessing.
   const hasPlayoffData = schedule.some(m => m.playoffTierType && m.playoffTierType !== 'NONE');
 
+  // Diagnostic: log what playoffTierType values actually exist in this
+  // league's data, so a mismatch between what ESPN sends and what this app
+  // expects is visible immediately in the console instead of silently
+  // failing to filter/detect playoffs.
+  const tierTypesSeen = [...new Set(schedule.map(m => m.playoffTierType === undefined ? '(field missing)' : String(m.playoffTierType)))];
+  console.log('[playoff diagnostic] playoffTierType values found in schedule:', tierTypesSeen);
+  console.log('[playoff diagnostic] hasPlayoffData:', hasPlayoffData, '| total schedule entries:', schedule.length);
+
   schedule.forEach(m => {
     const wk = m.matchupPeriodId;
     if (!wk) return;
