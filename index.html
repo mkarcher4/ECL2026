@@ -226,6 +226,10 @@
   .compact-grid table th, .compact-grid table td { font-size: 12.5px; padding: 6px 8px; }
   .compact-label { font-size: 12.5px; font-weight: 700; margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.05em; }
 
+  /* Playoff Bracket rounds */
+  .bracket-round { margin-bottom: 22px; }
+  .bracket-round-label { font-size: 13px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--gold); margin: 0 0 10px; font-weight: 700; }
+
   /* Tight, dense table (Weekly Scoring — many week columns) */
   .tight-table th, .tight-table td { font-size: 12px; padding: 5px 7px; white-space: nowrap; }
   .tight-table td.team, .tight-table th:first-child { white-space: normal; }
@@ -254,6 +258,7 @@
       <button data-tab="boxscore">Box Score</button>
       <button data-tab="teamcompare">Team Comparison</button>
       <button data-tab="draftrecap">Draft Recap</button>
+      <button data-tab="playoffs">Playoff Bracket</button>
     </nav>
 
     <div id="view-standings" class="view active"></div>
@@ -261,6 +266,7 @@
     <div id="view-boxscore" class="view"></div>
     <div id="view-teamcompare" class="view"></div>
     <div id="view-draftrecap" class="view"></div>
+    <div id="view-playoffs" class="view"></div>
   </div>
 </div>
 
@@ -383,30 +389,51 @@ function activateSeason(season) {
 function buildWeeklyAndMatchups(data) {
   WEEKLY = {};
   MATCHUPS_BY_WEEK = {};
-  (data.schedule || []).forEach(m => {
+
+  const schedule = data.schedule || [];
+
+  // Detect whether ESPN's playoffTierType tagging is actually present in
+  // this data. If no matchup anywhere has a non-"NONE" tier, either the
+  // playoffs haven't happened yet or this API response doesn't carry the
+  // field -- either way, treat everything as regular season (unchanged
+  // behavior) rather than guessing.
+  const hasPlayoffData = schedule.some(m => m.playoffTierType && m.playoffTierType !== 'NONE');
+
+  schedule.forEach(m => {
     const wk = m.matchupPeriodId;
     if (!wk) return;
     const home = m.home, away = m.away;
     if (!home) return;
     const homeDone = typeof home.totalPoints === 'number' && home.totalPoints > 0;
     const awayDone = away && typeof away.totalPoints === 'number' && away.totalPoints > 0;
+    const isRegularSeason = !hasPlayoffData || !m.playoffTierType || m.playoffTierType === 'NONE';
 
-    if (homeDone) {
-      WEEKLY[wk] = WEEKLY[wk] || [];
-      WEEKLY[wk].push({ teamId: home.teamId, points: home.totalPoints });
-    }
-    if (away && awayDone) {
-      WEEKLY[wk] = WEEKLY[wk] || [];
-      WEEKLY[wk].push({ teamId: away.teamId, points: away.totalPoints });
+    // WEEKLY feeds every standings-derived calculation (Median, What-If,
+    // Weekly High/Low Scorers, streaks, Position Breakdown, Roto Scoring)
+    // -- keep it regular-season-only so those totals match the same number
+    // of games as the Season Standings record ESPN reports.
+    if (isRegularSeason) {
+      if (homeDone) {
+        WEEKLY[wk] = WEEKLY[wk] || [];
+        WEEKLY[wk].push({ teamId: home.teamId, points: home.totalPoints });
+      }
+      if (away && awayDone) {
+        WEEKLY[wk] = WEEKLY[wk] || [];
+        WEEKLY[wk].push({ teamId: away.teamId, points: away.totalPoints });
+      }
     }
 
+    // MATCHUPS_BY_WEEK keeps EVERY week, including playoffs, so the
+    // Matchups/Box Score tabs and the Playoff Bracket tab can still browse
+    // and display those games.
     MATCHUPS_BY_WEEK[wk] = MATCHUPS_BY_WEEK[wk] || [];
     MATCHUPS_BY_WEEK[wk].push({
       homeId: home.teamId,
       awayId: away ? away.teamId : null,
       homeScore: home.totalPoints || 0,
       awayScore: away ? (away.totalPoints || 0) : null,
-      winner: m.winner
+      winner: m.winner,
+      playoffTierType: m.playoffTierType || 'NONE'
     });
   });
 }
@@ -694,6 +721,164 @@ function benchPointsMap(standard, whatIf) {
   return map;
 }
 
+// Builds one flat, sortable row per team combining every standings table's
+// record plus the trend stats, for the Standings Comparison table.
+function computeStandingsComparisonRows(standard, med, whatIf, medianWhatIf, streaks, luck, efficiency, benchPts) {
+  const medById = {}; med.forEach(t => { medById[t.id] = t; });
+  const whatIfById = {}; whatIf.forEach(t => { whatIfById[t.id] = t; });
+  const medianWhatIfById = {}; medianWhatIf.forEach(t => { medianWhatIfById[t.id] = t; });
+
+  const recordStr = t => t ? `${t.wins}-${t.losses}${t.ties ? '-' + t.ties : ''}` : '—';
+
+  return standard.map(t => {
+    const m = medById[t.id], w = whatIfById[t.id], mw = medianWhatIfById[t.id];
+    const streak = streaks[t.id] || { label: '—', cls: '' };
+    let streakVal = 0;
+    if (streak.label && streak.label !== '—') {
+      const n = parseInt(streak.label.slice(1), 10) || 0;
+      streakVal = streak.label[0] === 'W' ? n : streak.label[0] === 'L' ? -n : 0;
+    }
+    return {
+      id: t.id,
+      name: t.name,
+      seasonWins: t.wins,
+      seasonRecord: recordStr(t),
+      medianWins: m ? m.wins : null,
+      medianRecord: recordStr(m),
+      whatIfWins: w ? w.wins : null,
+      whatIfRecord: recordStr(w),
+      medianWhatIfWins: mw ? mw.wins : null,
+      medianWhatIfRecord: recordStr(mw),
+      streakVal,
+      streakLabel: streak.label,
+      streakCls: streak.cls,
+      luck: luck[t.id] || 0,
+      efficiency: efficiency[t.id],
+      benchPts: benchPts[t.id]
+    };
+  });
+}
+
+let standingsComparisonRows = [];
+let standingsComparisonSort = { key: 'seasonWins', dir: 'desc' };
+
+function renderStandingsComparisonTable() {
+  const key = standingsComparisonSort.key;
+  const dir = standingsComparisonSort.dir;
+
+  const sorted = [...standingsComparisonRows].sort((a, b) => {
+    let av = a[key], bv = b[key];
+    if (av === null || av === undefined) av = dir === 'asc' ? Infinity : -Infinity;
+    if (bv === null || bv === undefined) bv = dir === 'asc' ? Infinity : -Infinity;
+    if (typeof av === 'string') return dir === 'asc' ? av.localeCompare(bv) : bv.localeCompare(av);
+    return dir === 'asc' ? av - bv : bv - av;
+  });
+
+  const arrow = k => standingsComparisonSort.key === k ? (standingsComparisonSort.dir === 'asc' ? ' \u25B2' : ' \u25BC') : '';
+  const col = (k, label) => `<th class="num sortable" onclick="setStandingsComparisonSort('${k}')">${label}${arrow(k)}</th>`;
+
+  const luckCellFn = v => {
+    const cls = v > 0 ? 'luck-pos' : v < 0 ? 'luck-neg' : 'luck-zero';
+    const label = v > 0 ? `+${v}` : `${v}`;
+    return `<span class="${cls}">${label}</span>`;
+  };
+
+  const wrap = document.getElementById('standingsComparisonTableWrap');
+  if (!wrap) return;
+  wrap.innerHTML = `
+    <div class="table-scroll">
+    <table>
+      <thead><tr>
+        <th class="sortable" onclick="setStandingsComparisonSort('name')">Team${arrow('name')}</th>
+        ${col('seasonWins', 'Season')}
+        ${col('medianWins', 'Median')}
+        ${col('whatIfWins', 'What If')}
+        ${col('medianWhatIfWins', 'Median What If')}
+        ${col('streakVal', 'Win Streak')}
+        ${col('luck', 'Luck Index')}
+        ${col('efficiency', 'Manager Eff %')}
+        ${col('benchPts', 'Pts Left on Bench')}
+      </tr></thead>
+      <tbody>
+        ${sorted.map(t => `
+          <tr>
+            <td class="team">${t.name}</td>
+            <td class="num">${t.seasonRecord}</td>
+            <td class="num">${t.medianRecord}</td>
+            <td class="num">${t.whatIfRecord}</td>
+            <td class="num">${t.medianWhatIfRecord}</td>
+            <td class="num"><span class="${t.streakCls}">${t.streakLabel}</span></td>
+            <td class="num">${luckCellFn(t.luck)}</td>
+            <td class="num">${t.efficiency !== null && t.efficiency !== undefined ? t.efficiency.toFixed(1) + '%' : '—'}</td>
+            <td class="num">${t.benchPts !== undefined ? t.benchPts.toFixed(1) : '—'}</td>
+          </tr>`).join('')}
+      </tbody>
+    </table>
+    </div>
+  `;
+}
+
+function setStandingsComparisonSort(key) {
+  if (standingsComparisonSort.key === key) {
+    standingsComparisonSort.dir = standingsComparisonSort.dir === 'asc' ? 'desc' : 'asc';
+  } else {
+    standingsComparisonSort.key = key;
+    standingsComparisonSort.dir = key === 'name' ? 'asc' : 'desc';
+  }
+  renderStandingsComparisonTable();
+}
+
+let seasonStandingsRows = [];
+let seasonStandingsSort = { key: 'wins', dir: 'desc' };
+
+function renderSeasonStandingsTable() {
+  const key = seasonStandingsSort.key;
+  const dir = seasonStandingsSort.dir;
+
+  const sorted = [...seasonStandingsRows].sort((a, b) => {
+    let av = a[key], bv = b[key];
+    if (typeof av === 'string') return dir === 'asc' ? av.localeCompare(bv) : bv.localeCompare(av);
+    return dir === 'asc' ? av - bv : bv - av;
+  });
+
+  const arrow = k => seasonStandingsSort.key === k ? (seasonStandingsSort.dir === 'asc' ? ' \u25B2' : ' \u25BC') : '';
+  const col = (k, label) => `<th class="num sortable" onclick="setSeasonStandingsSort('${k}')">${label}${arrow(k)}</th>`;
+
+  const wrap = document.getElementById('seasonStandingsTableWrap');
+  if (!wrap) return;
+  wrap.innerHTML = `
+    <table>
+      <thead><tr>
+        <th></th>
+        <th class="sortable" onclick="setSeasonStandingsSort('name')">Team${arrow('name')}</th>
+        ${col('wins', 'Record')}
+        ${col('pf', 'Points For')}
+        ${col('pa', 'Points Against')}
+      </tr></thead>
+      <tbody>
+        ${sorted.map((t, i) => `
+          <tr class="${i === 0 ? 'rank1' : ''}">
+            <td class="rank">${i + 1}</td>
+            <td class="team">${t.name}</td>
+            <td class="num">${t.record}</td>
+            <td class="num">${t.pf.toFixed(1)}</td>
+            <td class="num">${t.pa.toFixed(1)}</td>
+          </tr>`).join('')}
+      </tbody>
+    </table>
+  `;
+}
+
+function setSeasonStandingsSort(key) {
+  if (seasonStandingsSort.key === key) {
+    seasonStandingsSort.dir = seasonStandingsSort.dir === 'asc' ? 'desc' : 'asc';
+  } else {
+    seasonStandingsSort.key = key;
+    seasonStandingsSort.dir = key === 'name' ? 'asc' : 'desc';
+  }
+  renderSeasonStandingsTable();
+}
+
 function renderStandings() {
   const standard = computeStandardStandings();
   const med = computeMedianStandings();
@@ -702,14 +887,16 @@ function renderStandings() {
   const whatIf = computeWhatIfStandings();
   const medianWhatIf = computeMedianWhatIfStandings();
 
-  const standardRecords = recordMap(standard);
-  const medianRecords = recordMap(med);
-  const whatIfRecords = recordMap(whatIf);
-  const medianWhatIfRecords = recordMap(medianWhatIf);
   const streaks = streakMap();
   const luck = luckIndexMap(standard, med);
   const efficiency = efficiencyMap(standard, whatIf);
   const benchPts = benchPointsMap(standard, whatIf);
+  standingsComparisonRows = computeStandingsComparisonRows(standard, med, whatIf, medianWhatIf, streaks, luck, efficiency, benchPts);
+  seasonStandingsRows = standard.map(t => ({
+    id: t.id, name: t.name, wins: t.wins, losses: t.losses, ties: t.ties,
+    record: `${t.wins}-${t.losses}${t.ties ? '-' + t.ties : ''}`,
+    pf: t.pf, pa: t.pa
+  }));
 
   const rowHtml = (t, i, extraCol) => `
     <tr class="${i === 0 ? 'rank1' : ''}">
@@ -719,12 +906,6 @@ function renderStandings() {
       <td class="num">${t.pf.toFixed(1)}</td>
       ${extraCol}
     </tr>`;
-
-  const luckCell = v => {
-    const cls = v > 0 ? 'luck-pos' : v < 0 ? 'luck-neg' : 'luck-zero';
-    const label = v > 0 ? `+${v}` : `${v}`;
-    return `<span class="${cls}">${label}</span>`;
-  };
 
   const seasonToggleHtml = AVAILABLE_SEASONS.length > 0 ? `
     <section class="block" style="margin-bottom:20px;">
@@ -740,13 +921,8 @@ function renderStandings() {
     ${seasonToggleHtml}
     <section class="block">
       <h2>Season Standings</h2>
-      <p class="sub">Actual head-to-head record</p>
-      <table>
-        <thead><tr><th></th><th>Team</th><th class="num">Record</th><th class="num">Points For</th><th class="num">Points Against</th></tr></thead>
-        <tbody>
-          ${standard.map((t, i) => rowHtml(t, i, `<td class="num">${t.pa.toFixed(1)}</td>`)).join('')}
-        </tbody>
-      </table>
+      <p class="sub">Actual head-to-head record. Click a column header to sort.</p>
+      <div id="seasonStandingsTableWrap"></div>
     </section>
     <section class="block">
       <h2>Weekly Extremes</h2>
@@ -774,35 +950,14 @@ function renderStandings() {
     </section>
     <section class="block">
       <h2>Standings Comparison</h2>
-      <p class="sub">Each team's record across every standings table, plus season-long trend stats</p>
+      <p class="sub">Each team's record across every standings table, plus season-long trend stats. Click a column header to sort.</p>
       <p class="sub">
         Win Streak reflects consecutive actual results, most recent first. Luck Index is actual wins minus median wins
         (positive = winning more than their scoring alone would predict). Manager Efficiency % is actual points scored
         ÷ optimal lineup points. Points Left on Bench is the season total of optimal minus actual scoring. All figures
-        only include completed weeks.
+        only include regular-season, completed weeks.
       </p>
-      <div class="table-scroll">
-      <table>
-        <thead><tr>
-          <th>Team</th><th class="num">Season</th><th class="num">Median</th><th class="num">What If</th><th class="num">Median What If</th>
-          <th class="num">Win Streak</th><th class="num">Luck Index</th><th class="num">Manager Eff %</th><th class="num">Pts Left on Bench</th>
-        </tr></thead>
-        <tbody>
-          ${standard.map(t => `
-            <tr>
-              <td class="team">${t.name}</td>
-              <td class="num">${standardRecords[t.id] || '—'}</td>
-              <td class="num">${medianRecords[t.id] || '—'}</td>
-              <td class="num">${whatIfRecords[t.id] || '—'}</td>
-              <td class="num">${medianWhatIfRecords[t.id] || '—'}</td>
-              <td class="num"><span class="${(streaks[t.id] || {}).cls || ''}">${(streaks[t.id] || {}).label || '—'}</span></td>
-              <td class="num">${luckCell(luck[t.id] || 0)}</td>
-              <td class="num">${efficiency[t.id] !== null && efficiency[t.id] !== undefined ? efficiency[t.id].toFixed(1) + '%' : '—'}</td>
-              <td class="num">${benchPts[t.id] !== undefined ? benchPts[t.id].toFixed(1) : '—'}</td>
-            </tr>`).join('')}
-        </tbody>
-      </table>
-      </div>
+      <div id="standingsComparisonTableWrap"></div>
     </section>
     <section class="block">
       <h2>Median Standings</h2>
@@ -847,6 +1002,8 @@ function renderStandings() {
     </section>
   `;
   document.getElementById('view-standings').innerHTML = html;
+  renderSeasonStandingsTable();
+  renderStandingsComparisonTable();
 
   const seasonSel = document.getElementById('seasonToggle');
   if (seasonSel) {
@@ -1705,6 +1862,93 @@ function setDraftRecapSort(key) {
   renderDraftRecapTable(applyDraftRecapFilters(draftRecapAllPicks));
 }
 
+// ---------- Playoff Bracket tab ----------
+// Reads directly from LEAGUE.schedule (every week, unfiltered) rather than
+// the regular-season-only WEEKLY -- playoff games are exactly what this tab
+// needs to show. Splits into the winners bracket (playoffTierType
+// "WINNERS_BRACKET") and a consolation bracket (any tier type starting with
+// "LOSERS"), then groups each into rounds by matchupPeriodId.
+function computePlayoffBrackets() {
+  const schedule = (LEAGUE && LEAGUE.schedule) || [];
+  const playoffMatchups = schedule.filter(m => m.playoffTierType && m.playoffTierType !== 'NONE');
+
+  const winners = playoffMatchups.filter(m => m.playoffTierType === 'WINNERS_BRACKET');
+  const consolation = playoffMatchups.filter(m => (m.playoffTierType || '').startsWith('LOSERS'));
+
+  function groupByRound(matchups) {
+    const byWeek = {};
+    matchups.forEach(m => {
+      byWeek[m.matchupPeriodId] = byWeek[m.matchupPeriodId] || [];
+      byWeek[m.matchupPeriodId].push(m);
+    });
+    return Object.keys(byWeek).map(Number).sort((a, b) => a - b).map(week => ({ week, matchups: byWeek[week] }));
+  }
+
+  return { winners: groupByRound(winners), consolation: groupByRound(consolation) };
+}
+
+function renderBracketRound(roundData, index, totalRounds, isFinalLabel) {
+  const label = index === totalRounds - 1 ? isFinalLabel : `Round ${index + 1}`;
+  const cards = roundData.matchups.map(m => {
+    const home = TEAMS[m.home.teamId];
+    const away = m.away ? TEAMS[m.away.teamId] : null;
+    const homeScore = m.home.totalPoints || 0;
+    const awayScore = m.away ? (m.away.totalPoints || 0) : null;
+    const homeWin = m.winner === 'HOME' || (m.winner !== 'AWAY' && awayScore !== null && homeScore > awayScore);
+    const awayWin = m.winner === 'AWAY' || (m.winner !== 'HOME' && awayScore !== null && awayScore > homeScore);
+    return `
+      <div class="matchup-card" style="cursor:default;">
+        <div class="side home ${homeWin ? 'winner' : ''}">
+          <div class="name">${teamName(home)}</div>
+          <div class="score">${homeScore.toFixed(1)}</div>
+        </div>
+        <div class="vs">WK ${roundData.week}</div>
+        <div class="side away ${awayWin ? 'winner' : ''}">
+          <div class="name">${away ? teamName(away) : 'BYE'}</div>
+          <div class="score">${awayScore !== null ? awayScore.toFixed(1) : '—'}</div>
+        </div>
+      </div>`;
+  }).join('');
+
+  return `
+    <div class="bracket-round">
+      <h3 class="bracket-round-label">${label}</h3>
+      <div class="matchup-grid">${cards}</div>
+    </div>`;
+}
+
+function renderPlayoffBracketTab() {
+  const container = document.getElementById('view-playoffs');
+  const { winners, consolation } = computePlayoffBrackets();
+
+  if (winners.length === 0 && consolation.length === 0) {
+    container.innerHTML = `
+      <section class="block">
+        <h2>Playoff Bracket</h2>
+        <p class="placeholder">No playoff matchups yet. This fills in automatically once the playoff weeks are underway.</p>
+      </section>
+    `;
+    return;
+  }
+
+  container.innerHTML = `
+    <section class="block">
+      <h2>Playoff Bracket</h2>
+      <p class="sub">The championship bracket</p>
+      ${winners.length
+        ? winners.map((r, i) => renderBracketRound(r, i, winners.length, 'Championship')).join('')
+        : '<p class="placeholder">No winners bracket data yet.</p>'}
+    </section>
+    <section class="block">
+      <h2>Consolation Bracket</h2>
+      <p class="sub">For teams that missed the championship bracket</p>
+      ${consolation.length
+        ? consolation.map((r, i) => renderBracketRound(r, i, consolation.length, 'Consolation Final')).join('')
+        : '<p class="placeholder">No consolation bracket data yet.</p>'}
+    </section>
+  `;
+}
+
 
 function renderWeeklyScoringTable() {
   const { weeks, rows } = computeWeeklyScoringTable();
@@ -1763,6 +2007,7 @@ document.querySelectorAll('nav.tabs button').forEach(btn => {
     document.getElementById('view-' + btn.dataset.tab).classList.add('active');
     if (btn.dataset.tab === 'teamcompare') renderTeamComparisonTab();
     if (btn.dataset.tab === 'draftrecap') renderDraftRecapTab();
+    if (btn.dataset.tab === 'playoffs') renderPlayoffBracketTab();
   });
 });
 </script>
