@@ -251,6 +251,12 @@
   /* Tight, dense table (Weekly Scoring — many week columns) */
   .tight-table th, .tight-table td { font-size: 12px; padding: 5px 7px; white-space: nowrap; }
   .tight-table td.team, .tight-table th:first-child { white-space: normal; }
+
+  /* Narrow table (Free Agent Budget Summary) -- content-width instead of
+     stretching to fill the card, so a 3-column table doesn't look sparse */
+  .narrow-table { table-layout: auto; width: auto; }
+  .narrow-table td, .narrow-table th { white-space: nowrap; padding-right: 22px; }
+  .narrow-table td:last-child, .narrow-table th:last-child { padding-right: 8px; }
 </style>
 </head>
 <body>
@@ -875,7 +881,7 @@ function renderSeasonStandingsTable() {
   const wrap = document.getElementById('seasonStandingsTableWrap');
   if (!wrap) return;
   wrap.innerHTML = `
-    <table>
+    <table class="narrow-table">
       <thead><tr>
         <th></th>
         <th class="sortable" onclick="setSeasonStandingsSort('name')">Team${arrow('name')}</th>
@@ -990,7 +996,7 @@ function renderStandings() {
     <section class="block">
       <h2>Median Standings</h2>
       <p class="sub">Each week, scoring above the 12-team median counts as a win; below counts as a loss</p>
-      <table>
+      <table class="narrow-table">
         <thead><tr><th></th><th>Team</th><th class="num">Median Record</th><th class="num">Points For</th><th></th></tr></thead>
         <tbody>
           ${med.map((t, i) => rowHtml(t, i, `<td></td>`)).join('')}
@@ -1000,7 +1006,7 @@ function renderStandings() {
     <section class="block">
       <h2>What-If Standings</h2>
       <p class="sub">Record if every team started their optimal lineup each week</p>
-      <table>
+      <table class="narrow-table">
         <thead><tr><th></th><th>Team</th><th class="num">What-If Record</th><th class="num">Optimal Points</th><th></th></tr></thead>
         <tbody>
           ${whatIf.map((t, i) => rowHtml(t, i, `<td></td>`)).join('') || '<tr><td colspan="4" class="placeholder">No box score data yet.</td></tr>'}
@@ -1010,7 +1016,7 @@ function renderStandings() {
     <section class="block">
       <h2>Median What-If Standings</h2>
       <p class="sub">Each week, optimal-lineup score above the 12-team median (of optimal scores) counts as a win; below counts as a loss</p>
-      <table>
+      <table class="narrow-table">
         <thead><tr><th></th><th>Team</th><th class="num">Median What-If Record</th><th class="num">Optimal Points</th><th></th></tr></thead>
         <tbody>
           ${medianWhatIf.map((t, i) => rowHtml(t, i, `<td></td>`)).join('') || '<tr><td colspan="4" class="placeholder">No box score data yet.</td></tr>'}
@@ -2105,7 +2111,7 @@ function renderFaabBudgetTable() {
   const wrap = document.getElementById('faabBudgetTableWrap');
   if (!wrap) return;
   wrap.innerHTML = `
-    <table>
+    <table class="narrow-table">
       <thead><tr><th class="num">Pos</th><th>Team</th><th class="num">Budget</th></tr></thead>
       <tbody>
         ${rows.map((r, i) => `
