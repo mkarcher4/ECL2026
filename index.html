@@ -30,6 +30,7 @@
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
     font-variant-numeric: tabular-nums;
     min-height: 100vh;
+    overflow-x: hidden;
   }
   .wrap { max-width: 1140px; margin: 0 auto; padding: 28px 20px 80px; }
 
@@ -86,8 +87,15 @@
     gap: 2px;
     margin-bottom: 22px;
     border-bottom: 1px solid var(--border);
+    overflow-x: auto;
+    overflow-y: hidden;
+    flex-wrap: nowrap;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
   }
+  nav.tabs::-webkit-scrollbar { display: none; }
   nav.tabs button {
+    flex: 0 0 auto;
     background: none;
     border: none;
     color: var(--text-muted);
@@ -145,6 +153,16 @@
     padding: 7px 10px;
     border-radius: 6px;
     font-size: 14px;
+  }
+  .filter-row { display: flex; align-items: center; gap: 10px; margin: 14px 0; flex-wrap: wrap; }
+  .filter-row label { font-size: 12px; color: var(--text-muted); display: flex; flex-direction: column; gap: 4px; }
+  .filter-row select, .filter-row input[type="date"] {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 7px 10px;
+    border-radius: 6px;
+    font-size: 13.5px;
   }
   .matchup-grid { display: grid; gap: 10px; }
   .matchup-card {
@@ -258,6 +276,7 @@
       <button data-tab="boxscore">Box Score</button>
       <button data-tab="teamcompare">Team Comparison</button>
       <button data-tab="draftrecap">Draft Recap</button>
+      <button data-tab="waivers">Waivers</button>
       <button data-tab="playoffs">Playoff Bracket</button>
     </nav>
 
@@ -266,6 +285,7 @@
     <div id="view-boxscore" class="view"></div>
     <div id="view-teamcompare" class="view"></div>
     <div id="view-draftrecap" class="view"></div>
+    <div id="view-waivers" class="view"></div>
     <div id="view-playoffs" class="view"></div>
   </div>
 </div>
@@ -1763,7 +1783,7 @@ function renderDraftRecapTab() {
         dropped and never picked up again; a pick is only marked "incomplete" in the rare case that data isn't
         available either. Click a column header to sort.
       </p>
-      <div class="h2h-picker">
+      <div class="filter-row">
         <select id="draftRecapTeamFilter">
           <option value="all">All Teams</option>
           ${teamIds.map(id => `<option value="${id}">${teamName(TEAMS[id])}</option>`).join('')}
@@ -1868,6 +1888,315 @@ function setDraftRecapSort(key) {
     draftRecapSort.dir = (key === 'teamName' || key === 'playerName' || key === 'pos') ? 'asc' : 'desc';
   }
   renderDraftRecapTable(applyDraftRecapFilters(draftRecapAllPicks));
+}
+
+// ---------- Waivers tab ----------
+// Player names/positions for transactions are resolved from the same merged
+// lookup Draft Recap already builds (buildDraftPlayerInfo): preferring
+// ESPN's full player-pool data, falling back to box-score-derived info.
+function getPlayerNamePos(playerId) {
+  const info = buildDraftPlayerInfo();
+  const entry = info[playerId];
+  return entry ? { name: entry.name, pos: entry.pos } : { name: 'Unknown Player', pos: null };
+}
+
+function memberDisplayName(ownerGuid) {
+  const members = (LEAGUE && LEAGUE.members) || [];
+  const m = members.find(x => x.id === ownerGuid);
+  if (!m) return null;
+  return m.displayName || [m.firstName, m.lastName].filter(Boolean).join(' ') || null;
+}
+
+function teamManagerName(team) {
+  if (!team || !Array.isArray(team.owners) || team.owners.length === 0) return '—';
+  const names = team.owners.map(memberDisplayName).filter(Boolean);
+  return names.length ? names.join(', ') : '—';
+}
+
+// "Moved" = ESPN's ROSTER transaction type (IR slot moves, lineup drag/drop
+// logged as transactions) -- not an actual add/drop/trade. Excluded by
+// default, matching ESPN's own "All, Except Moved" default filter.
+function isMovedTransaction(t) {
+  return t.type === 'ROSTER';
+}
+
+function transactionTypeLabel(t) {
+  if (t.type === 'WAIVER') return 'Waiver';
+  if (t.type === 'FREEAGENT') return 'Free Agent';
+  if (t.type === 'TRADE') return 'Trade';
+  if (t.type === 'ROSTER') return 'Moved';
+  return t.type || 'Other';
+}
+
+function formatTransactionDetail(t) {
+  const teamNm = teamName(TEAMS[t.teamId]);
+  const lines = [];
+  (t.items || []).forEach(item => {
+    const { name, pos } = getPlayerNamePos(item.playerId);
+    const posLabel = pos ? `, ${pos}` : '';
+    if (item.type === 'ADD' || item.type === 'WAIVER_ADD' || item.type === 'FREEAGENT_ADD') {
+      const source = t.type === 'WAIVER' ? 'Waivers' : 'Free Agency';
+      const bid = (typeof t.bidAmount === 'number') ? ` for $${t.bidAmount}` : '';
+      lines.push(`${teamNm} added ${name}${posLabel} from ${source}${bid}`);
+    } else if (item.type === 'DROP') {
+      lines.push(`${teamNm} dropped ${name}${posLabel} to Waivers`);
+    } else if (item.type && item.type.indexOf('TRADE') !== -1) {
+      const fromTm = teamName(TEAMS[item.fromTeamId]);
+      const toTm = teamName(TEAMS[item.toTeamId]);
+      lines.push(`${fromTm} traded ${name}${posLabel} to ${toTm}`);
+    } else {
+      lines.push(`${teamNm} moved ${name}${posLabel}`);
+    }
+  });
+  return lines.join('<br>') || '—';
+}
+
+function txnDateMs(t) {
+  return typeof t.date === 'number' ? t.date : null;
+}
+
+let waiverActivityFilters = { activityType: 'all', startDate: '', endDate: '', team: 'all', transactions: 'except_moved' };
+
+function applyActivityFilters(transactions) {
+  return transactions.filter(t => {
+    if (waiverActivityFilters.transactions === 'except_moved' && isMovedTransaction(t)) return false;
+    if (waiverActivityFilters.activityType !== 'all' && transactionTypeLabel(t) !== waiverActivityFilters.activityType) return false;
+    if (waiverActivityFilters.team !== 'all' && String(t.teamId) !== String(waiverActivityFilters.team)) return false;
+    const ms = txnDateMs(t);
+    if (waiverActivityFilters.startDate && ms !== null) {
+      if (ms < new Date(waiverActivityFilters.startDate + 'T00:00:00').getTime()) return false;
+    }
+    if (waiverActivityFilters.endDate && ms !== null) {
+      if (ms > new Date(waiverActivityFilters.endDate + 'T23:59:59').getTime()) return false;
+    }
+    return true;
+  });
+}
+
+function renderRecentActivityTable() {
+  const all = (LEAGUE && LEAGUE.transactions) || [];
+  const filtered = applyActivityFilters(all).slice().sort((a, b) => (txnDateMs(b) || 0) - (txnDateMs(a) || 0));
+
+  const wrap = document.getElementById('recentActivityTableWrap');
+  if (!wrap) return;
+  wrap.innerHTML = `
+    <div class="table-scroll">
+    <table>
+      <thead><tr><th>Date</th><th>Type</th><th>Detail</th><th>Team</th></tr></thead>
+      <tbody>
+        ${filtered.map(t => {
+          const ms = txnDateMs(t);
+          const dateStr = ms ? new Date(ms).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : '—';
+          return `<tr>
+            <td>${dateStr}</td>
+            <td>${transactionTypeLabel(t)}</td>
+            <td>${formatTransactionDetail(t)}</td>
+            <td class="team">${teamName(TEAMS[t.teamId])}</td>
+          </tr>`;
+        }).join('') || '<tr><td colspan="4" class="placeholder">No transactions match this filter.</td></tr>'}
+      </tbody>
+    </table>
+    </div>
+  `;
+}
+
+function computeFreeAgentOfferDates() {
+  const all = (LEAGUE && LEAGUE.transactions) || [];
+  const waiverTxns = all.filter(t => t.type === 'WAIVER' && txnDateMs(t) !== null);
+  const dayKeys = new Set(waiverTxns.map(t => new Date(txnDateMs(t)).toISOString().slice(0, 10)));
+  return [...dayKeys].sort((a, b) => b.localeCompare(a));
+}
+
+let faOfferDateFilter = null;
+
+function renderFreeAgentOffersReport() {
+  const all = (LEAGUE && LEAGUE.transactions) || [];
+  const dates = computeFreeAgentOfferDates();
+  if (!faOfferDateFilter || !dates.includes(faOfferDateFilter)) {
+    faOfferDateFilter = dates[0] || null;
+  }
+
+  const wrap = document.getElementById('faOffersTableWrap');
+  if (!wrap) return;
+
+  if (!faOfferDateFilter) {
+    wrap.innerHTML = '<p class="placeholder">No waiver processing dates found yet.</p>';
+    return;
+  }
+
+  const dayTxns = all.filter(t => {
+    if (t.type !== 'WAIVER' || txnDateMs(t) === null) return false;
+    return new Date(txnDateMs(t)).toISOString().slice(0, 10) === faOfferDateFilter;
+  });
+
+  const rows = dayTxns.map(t => {
+    const addItem = (t.items || []).find(i => i.type === 'ADD' || i.type === 'WAIVER_ADD');
+    const dropItem = (t.items || []).find(i => i.type === 'DROP');
+    const claim = addItem ? getPlayerNamePos(addItem.playerId) : { name: '—', pos: null };
+    const successful = t.status === 'EXECUTED';
+    let results;
+    if (successful) {
+      const dropInfo = dropItem ? getPlayerNamePos(dropItem.playerId) : null;
+      results = dropInfo
+        ? `Added. ${teamName(TEAMS[t.teamId])} dropped ${dropInfo.name}${dropInfo.pos ? ', ' + dropInfo.pos : ''} to Waivers.`
+        : 'Added.';
+    } else {
+      // ESPN generates a specific human-readable failure reason (e.g. "player
+      // already added to another team") that the API doesn't expose directly
+      // -- showing the raw status here rather than guessing the wording.
+      results = `Unsuccessful. Reason: ${t.status || 'unknown'}.`;
+    }
+    return {
+      team: teamName(TEAMS[t.teamId]),
+      claim: `${claim.name}${claim.pos ? ', ' + claim.pos : ''}`,
+      offer: (typeof t.bidAmount === 'number') ? `$${t.bidAmount}` : '—',
+      results,
+      successful
+    };
+  });
+
+  wrap.innerHTML = `
+    <div class="table-scroll">
+    <table>
+      <thead><tr><th class="num">Pos</th><th>Team</th><th>Claim</th><th class="num">Offer</th><th>Results</th></tr></thead>
+      <tbody>
+        ${rows.map((r, i) => `
+          <tr>
+            <td class="num">${i + 1}</td>
+            <td class="team">${r.team}</td>
+            <td>${r.claim}</td>
+            <td class="num">${r.offer}</td>
+            <td style="color:${r.successful ? 'var(--win)' : 'var(--loss)'}">${r.results}</td>
+          </tr>`).join('') || '<tr><td colspan="5" class="placeholder">No offers processed this date.</td></tr>'}
+      </tbody>
+    </table>
+    </div>
+  `;
+}
+
+function computeFaabBudgets() {
+  const total = LEAGUE && LEAGUE.faabTotalBudget;
+  return Object.values(TEAMS).map(t => {
+    const spent = (t.transactionCounter && t.transactionCounter.acquisitionBudgetSpent) || 0;
+    const remaining = (total !== null && total !== undefined) ? (total - spent) : null;
+    return { id: t.id, name: teamName(t), manager: teamManagerName(t), spent, remaining };
+  }).sort((a, b) => (b.remaining ?? -Infinity) - (a.remaining ?? -Infinity));
+}
+
+function renderFaabBudgetTable() {
+  const rows = computeFaabBudgets();
+  const wrap = document.getElementById('faabBudgetTableWrap');
+  if (!wrap) return;
+  wrap.innerHTML = `
+    <table>
+      <thead><tr><th class="num">Pos</th><th>Team</th><th>Manager(s)</th><th class="num">Budget</th></tr></thead>
+      <tbody>
+        ${rows.map((r, i) => `
+          <tr class="${i === 0 ? 'rank1' : ''}">
+            <td class="num">${i + 1}</td>
+            <td class="team">${r.name}</td>
+            <td>${r.manager}</td>
+            <td class="num">${r.remaining !== null ? '$' + r.remaining : '—'}</td>
+          </tr>`).join('')}
+      </tbody>
+    </table>
+  `;
+}
+
+function renderWaiversTab() {
+  const container = document.getElementById('view-waivers');
+  const teamIds = Object.keys(TEAMS);
+  const all = (LEAGUE && LEAGUE.transactions) || [];
+  const activityTypes = [...new Set(all.map(transactionTypeLabel))].sort();
+  const offerDates = computeFreeAgentOfferDates();
+  if (!faOfferDateFilter || !offerDates.includes(faOfferDateFilter)) {
+    faOfferDateFilter = offerDates[0] || null;
+  }
+
+  container.innerHTML = `
+    <section class="block">
+      <h2>Recent Activity</h2>
+      <p class="sub">All roster transactions -- defaults to excluding "Moved" (IR/roster slot moves), matching ESPN's own default filter.</p>
+      <div class="filter-row">
+        <label>Activity Type
+          <select id="waiverActivityType">
+            <option value="all">All</option>
+            ${activityTypes.map(a => `<option value="${a}">${a}</option>`).join('')}
+          </select>
+        </label>
+        <label>Start Date
+          <input type="date" id="waiverStartDate">
+        </label>
+        <label>End Date
+          <input type="date" id="waiverEndDate">
+        </label>
+        <label>Team
+          <select id="waiverTeamFilter">
+            <option value="all">All</option>
+            ${teamIds.map(id => `<option value="${id}">${teamName(TEAMS[id])}</option>`).join('')}
+          </select>
+        </label>
+        <label>Transactions
+          <select id="waiverTxnFilter">
+            <option value="except_moved">All, Except Moved</option>
+            <option value="all">All</option>
+          </select>
+        </label>
+      </div>
+      <div id="recentActivityTableWrap"></div>
+    </section>
+    <section class="block">
+      <h2>Free Agent Offers Report</h2>
+      <p class="sub">Waiver claims processed on a given date</p>
+      <div class="filter-row">
+        <label>View Date
+          <select id="faOfferDate">
+            ${offerDates.map(d => `<option value="${d}" ${d === faOfferDateFilter ? 'selected' : ''}>${new Date(d + 'T00:00:00').toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' })}</option>`).join('') || '<option value="">No dates available</option>'}
+          </select>
+        </label>
+      </div>
+      <div id="faOffersTableWrap"></div>
+    </section>
+    <section class="block">
+      <h2>Free Agent Budget Summary</h2>
+      <p class="sub">Remaining FAAB budget per team${LEAGUE && LEAGUE.faabTotalBudget ? ` (of $${LEAGUE.faabTotalBudget} total)` : ''}</p>
+      <div id="faabBudgetTableWrap"></div>
+    </section>
+  `;
+
+  const typeSel = document.getElementById('waiverActivityType');
+  const startInput = document.getElementById('waiverStartDate');
+  const endInput = document.getElementById('waiverEndDate');
+  const teamSel = document.getElementById('waiverTeamFilter');
+  const txnSel = document.getElementById('waiverTxnFilter');
+
+  typeSel.value = waiverActivityFilters.activityType;
+  startInput.value = waiverActivityFilters.startDate;
+  endInput.value = waiverActivityFilters.endDate;
+  teamSel.value = waiverActivityFilters.team;
+  txnSel.value = waiverActivityFilters.transactions;
+
+  [
+    [typeSel, 'activityType'], [startInput, 'startDate'], [endInput, 'endDate'],
+    [teamSel, 'team'], [txnSel, 'transactions']
+  ].forEach(([el, key]) => {
+    el.addEventListener('change', () => {
+      waiverActivityFilters[key] = el.value;
+      renderRecentActivityTable();
+    });
+  });
+
+  const dateSel = document.getElementById('faOfferDate');
+  if (dateSel) {
+    dateSel.addEventListener('change', () => {
+      faOfferDateFilter = dateSel.value;
+      renderFreeAgentOffersReport();
+    });
+  }
+
+  renderRecentActivityTable();
+  renderFreeAgentOffersReport();
+  renderFaabBudgetTable();
 }
 
 // ---------- Playoff Bracket tab ----------
@@ -2015,6 +2344,7 @@ document.querySelectorAll('nav.tabs button').forEach(btn => {
     document.getElementById('view-' + btn.dataset.tab).classList.add('active');
     if (btn.dataset.tab === 'teamcompare') renderTeamComparisonTab();
     if (btn.dataset.tab === 'draftrecap') renderDraftRecapTab();
+    if (btn.dataset.tab === 'waivers') renderWaiversTab();
     if (btn.dataset.tab === 'playoffs') renderPlayoffBracketTab();
   });
 });

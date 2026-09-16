@@ -214,6 +214,46 @@ def trim_matchup(m):
     }
 
 
+def fetch_transactions(season):
+    """
+    Pulls the full transaction log (adds, drops, trades, waiver claims, IR
+    moves) for the season using ESPN's mTransactions2 view. Trims each
+    transaction down to just the fields the Waivers tab needs -- player
+    names get resolved client-side from seasonPlayerStats rather than
+    duplicated here.
+    """
+    try:
+        data = get(season, "mTransactions2")
+    except Exception as e:
+        print(f"  Could not fetch transactions: {e}")
+        return []
+
+    raw_txns = data.get("transactions", [])
+    result = []
+    for t in raw_txns:
+        items = []
+        for item in t.get("items", []):
+            items.append({
+                "playerId": item.get("playerId"),
+                "type": item.get("type"),
+                "fromTeamId": item.get("fromTeamId"),
+                "toTeamId": item.get("toTeamId"),
+            })
+        result.append({
+            "id": t.get("id"),
+            "type": t.get("type"),
+            "status": t.get("status"),
+            "date": t.get("proposedDate") or t.get("processDate"),
+            "scoringPeriodId": t.get("scoringPeriodId"),
+            "teamId": t.get("teamId"),
+            "bidAmount": t.get("bidAmount"),
+            "items": items,
+        })
+
+    print(f"  Transactions fetched: {len(result)}")
+    return result
+
+
 def fetch_season_data(season):
     """Fetches one full season's worth of league data (the same shape the
     app has always expected) and returns it as a dict."""
@@ -229,6 +269,15 @@ def fetch_season_data(season):
     print(f"Draft picks fetched: {len(draft_picks)}")
 
     season_player_stats = fetch_season_player_stats(season)
+    transactions = fetch_transactions(season)
+    faab_total_budget = core.get("settings", {}).get("acquisitionSettings", {}).get("acquisitionBudget")
+    # League members, trimmed to just what's needed to resolve a team's
+    # owner GUID(s) into a display name for the Free Agent Budget Summary.
+    members = [
+        {"id": m.get("id"), "displayName": m.get("displayName"),
+         "firstName": m.get("firstName"), "lastName": m.get("lastName")}
+        for m in core.get("members", [])
+    ]
 
     print(f"League: {league_name} | Teams: {len(teams)} | Week: {current_week}")
 
@@ -252,6 +301,9 @@ def fetch_season_data(season):
         "weeklyBoxscores": weekly_boxscores,
         "draftPicks": draft_picks,
         "seasonPlayerStats": season_player_stats,
+        "transactions": transactions,
+        "faabTotalBudget": faab_total_budget,
+        "members": members,
     }
 
 
