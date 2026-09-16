@@ -3,10 +3,10 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>East Cobb League</title>
+<title>BTP2026</title>
 <link rel="apple-touch-icon" href="icon-180.png">
 <link rel="icon" type="image/png" href="icon-512.png">
-<meta name="apple-mobile-web-app-title" content="East Cobb League">
+<meta name="apple-mobile-web-app-title" content="BTP2026">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="theme-color" content="#10151c">
 <style>
@@ -270,7 +270,10 @@ const WEEKLY_PRIZE = 30;
 const FIRST_PLACE_PRIZE = 500;
 const SECOND_PLACE_PRIZE = 250;
 
-let LEAGUE = null;   // raw loaded JSON
+let LEAGUE = null;   // raw loaded JSON for the CURRENTLY SELECTED season
+let ALL_SEASONS = {}; // season (string) -> that season's league data, same shape LEAGUE used to be
+let AVAILABLE_SEASONS = []; // sorted descending, e.g. [2026, 2025]
+let CURRENT_SEASON = null;
 let TEAMS = {};      // id -> team object
 let WEEKLY = {};      // week -> [{teamId, points}]
 let MATCHUPS_BY_WEEK = {}; // week -> [{home, away, homeScore, awayScore, homeId, awayId}]
@@ -321,25 +324,60 @@ function teamName(t) {
 
 function loadLeague(data) {
   try {
-    LEAGUE = data;
-    TEAMS = {};
-    (data.teams || []).forEach(t => { TEAMS[t.id] = t; });
-
-    buildWeeklyAndMatchups(data);
-
-    document.getElementById('leagueTitle').textContent = data.leagueName || 'League Tracker';
-    document.getElementById('leagueMeta').textContent =
-      (data.season || '') + ' Season · ' + Object.keys(TEAMS).length + ' Teams · Through Week ' + (data.currentWeek || '?');
+    // Back-compat: older synced JSON (pre-multi-season) is a flat single
+    // season object at the root, with no "seasons" key. Wrap it into the
+    // same shape as the new format so everything downstream can assume
+    // multi-season structure without special-casing it.
+    if (data && data.seasons) {
+      ALL_SEASONS = data.seasons;
+      AVAILABLE_SEASONS = (data.availableSeasons && data.availableSeasons.length)
+        ? data.availableSeasons
+        : Object.keys(data.seasons).map(Number).sort((a, b) => b - a);
+    } else if (data && data.season) {
+      ALL_SEASONS = { [String(data.season)]: data };
+      AVAILABLE_SEASONS = [data.season];
+    } else {
+      throw new Error('Unrecognized league_data.json format');
+    }
 
     document.getElementById('loaderCard').style.display = 'none';
     document.getElementById('app').style.display = 'block';
     document.getElementById('headerSyncBtn').style.display = 'inline-block';
 
-    renderStandings();
-    renderMatchupsTab();
+    activateSeason(AVAILABLE_SEASONS[0]);
   } catch (err) {
     document.getElementById('loadErr').textContent = 'Error reading league data: ' + err.message;
   }
+}
+
+// Switches the whole app to a different season's data. Every tab reads from
+// the TEAMS/WEEKLY/MATCHUPS_BY_WEEK/LEAGUE globals, so once those are
+// swapped and season-scoped caches are cleared, re-rendering the currently
+// visible tab (and pre-rendering Matchups, matching the original eager-load
+// behavior) is all that's needed -- no other tab-specific code has to know
+// seasons exist.
+function activateSeason(season) {
+  CURRENT_SEASON = season;
+  LEAGUE = ALL_SEASONS[String(season)];
+  if (!LEAGUE) return;
+
+  TEAMS = {};
+  (LEAGUE.teams || []).forEach(t => { TEAMS[t.id] = t; });
+
+  buildWeeklyAndMatchups(LEAGUE);
+
+  // Season-scoped caches/state that must not leak between seasons
+  draftPlayerInfoCache = null;
+  draftRecapFilters = { team: 'all', pos: 'all' };
+  draftRecapAllPicks = [];
+  document.getElementById('view-boxscore').innerHTML = '';
+
+  document.getElementById('leagueTitle').textContent = LEAGUE.leagueName || 'League Tracker';
+  document.getElementById('leagueMeta').textContent =
+    (LEAGUE.season || '') + ' Season · ' + Object.keys(TEAMS).length + ' Teams · Through Week ' + (LEAGUE.currentWeek || '?');
+
+  renderStandings();
+  renderMatchupsTab();
 }
 
 function buildWeeklyAndMatchups(data) {
@@ -688,7 +726,18 @@ function renderStandings() {
     return `<span class="${cls}">${label}</span>`;
   };
 
+  const seasonToggleHtml = AVAILABLE_SEASONS.length > 0 ? `
+    <section class="block" style="margin-bottom:20px;">
+      <label style="display:flex; align-items:center; gap:10px; font-size:13px; color:var(--text-muted);">
+        Season
+        <select id="seasonToggle" style="background:var(--surface); border:1px solid var(--border); color:var(--text); padding:6px 10px; border-radius:6px; font-size:14px;">
+          ${AVAILABLE_SEASONS.map(s => `<option value="${s}" ${String(s) === String(CURRENT_SEASON) ? 'selected' : ''}>${s}</option>`).join('')}
+        </select>
+      </label>
+    </section>` : '';
+
   const html = `
+    ${seasonToggleHtml}
     <section class="block">
       <h2>Season Standings</h2>
       <p class="sub">Actual head-to-head record</p>
@@ -798,6 +847,13 @@ function renderStandings() {
     </section>
   `;
   document.getElementById('view-standings').innerHTML = html;
+
+  const seasonSel = document.getElementById('seasonToggle');
+  if (seasonSel) {
+    seasonSel.addEventListener('change', () => {
+      activateSeason(Number(seasonSel.value));
+    });
+  }
 
   const cb = document.getElementById('champToggle');
   if (cb) {
