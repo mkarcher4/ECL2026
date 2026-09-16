@@ -565,7 +565,7 @@ function computeMoneyTracker(champCheckboxChecked) {
 function renderMoneyTable(champCheckboxChecked) {
   const rows = computeMoneyTracker(champCheckboxChecked);
   return `
-    <table>
+    <table class="narrow-table">
       <thead><tr><th></th><th>Team</th><th class="num">Weekly Wins</th><th class="num">Money Won</th><th class="num">Buy-In Owed</th><th class="num">Net</th></tr></thead>
       <tbody>
         ${rows.map((t, i) => `
@@ -964,7 +964,7 @@ function renderStandings() {
       <div class="compact-grid">
         <div>
           <div class="compact-label" style="color:var(--win);">Highest Scorer</div>
-          <table>
+          <table class="narrow-table">
             <thead><tr><th class="num">Week</th><th>Team</th><th class="num">Points</th></tr></thead>
             <tbody>
               ${highScores.map(h => `<tr><td class="num">${h.week}</td><td class="team">${h.name}</td><td class="num">${h.points.toFixed(1)}</td></tr>`).join('') || '<tr><td colspan="3" class="placeholder">No completed weeks yet.</td></tr>'}
@@ -973,7 +973,7 @@ function renderStandings() {
         </div>
         <div>
           <div class="compact-label" style="color:var(--loss);">Lowest Scorer</div>
-          <table>
+          <table class="narrow-table">
             <thead><tr><th class="num">Week</th><th>Team</th><th class="num">Points</th></tr></thead>
             <tbody>
               ${lowScores.map(h => `<tr><td class="num">${h.week}</td><td class="team">${h.name}</td><td class="num">${h.points.toFixed(1)}</td></tr>`).join('') || '<tr><td colspan="3" class="placeholder">No completed weeks yet.</td></tr>'}
