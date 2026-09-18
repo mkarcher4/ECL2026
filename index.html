@@ -204,6 +204,7 @@
   .box-header .score { font-size: 30px; font-weight: 800; }
   .box-header .away { text-align: right; }
   .whatif { font-size: 12px; color: var(--text-muted); margin-top: 2px; }
+  .proj-line { font-size: 12px; color: var(--text-muted); margin-top: 2px; }
   .whatif-diff { color: var(--gold); font-weight: 700; }
   .roster-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
   @media (max-width: 640px) { .roster-grid { grid-template-columns: 1fr; } }
@@ -1102,6 +1103,23 @@ function computeLiveMatchupScore(sideData, week) {
   return total;
 }
 
+// Sums each starter's projected points (ESPN's pre-game/in-progress
+// projection, a separate stat source from actual points). Returns null if
+// no starter has a projection available at all, so callers can distinguish
+// "no projection data" from "projected zero."
+function computeProjectedMatchupScore(sideData) {
+  if (!sideData) return null;
+  const entries = getRosterEntries(sideData).filter(e => e.lineupSlotId !== 20 && e.lineupSlotId !== 21);
+  if (!entries.length) return null;
+  let total = 0;
+  let any = false;
+  entries.forEach(e => {
+    const proj = getPlayerProjectedPoints(e);
+    if (proj !== null) { total += proj; any = true; }
+  });
+  return any ? total : null;
+}
+
 function renderMatchupGrid(week) {
   const list = MATCHUPS_BY_WEEK[week] || [];
   const grid = document.getElementById('matchupGrid');
@@ -1112,6 +1130,8 @@ function renderMatchupGrid(week) {
     const liveAway = box && box.away ? computeLiveMatchupScore(box.away, week) : null;
     const homeScore = liveHome !== null ? liveHome : m.homeScore;
     const awayScore = m.awayId !== null ? (liveAway !== null ? liveAway : m.awayScore) : null;
+    const projHome = box ? computeProjectedMatchupScore(box.home) : null;
+    const projAway = box && box.away ? computeProjectedMatchupScore(box.away) : null;
 
     const homeWin = awayScore !== null && homeScore > awayScore;
     const awayWin = awayScore !== null && awayScore > homeScore;
@@ -1120,11 +1140,13 @@ function renderMatchupGrid(week) {
         <div class="side home ${homeWin ? 'winner' : ''} ${awayWin ? 'loser' : ''}">
           <div class="name">${teamName(home)}</div>
           <div class="score">${homeScore.toFixed(1)}</div>
+          ${projHome !== null ? `<div class="proj-line">Proj: ${projHome.toFixed(1)}</div>` : ''}
         </div>
         <div class="vs">WK ${week}</div>
         <div class="side away ${awayWin ? 'winner' : ''} ${homeWin ? 'loser' : ''}">
           <div class="name">${teamName(away)}</div>
           <div class="score">${awayScore !== null ? awayScore.toFixed(1) : '—'}</div>
+          ${projAway !== null ? `<div class="proj-line">Proj: ${projAway.toFixed(1)}</div>` : ''}
         </div>
       </div>`;
   }).join('') || '<p class="placeholder">No matchups this week.</p>';
@@ -1163,6 +1185,12 @@ function getPlayerPoints(entry, week) {
     const stat = player.stats.find(s => s.scoringPeriodId === week && (s.statSourceId === 0 || s.statSourceId === undefined));
     if (stat && typeof stat.appliedTotal === 'number') return stat.appliedTotal;
   }
+  return null;
+}
+
+function getPlayerProjectedPoints(entry) {
+  const ppe = entry.playerPoolEntry || entry;
+  if (typeof ppe.projectedTotal === 'number') return ppe.projectedTotal;
   return null;
 }
 
@@ -1316,12 +1344,15 @@ function openBoxScore(week, homeId, awayId) {
 
   const homeOptimal = match ? computeOptimalScore(match.home, week) : null;
   const awayOptimal = match ? computeOptimalScore(match.away, week) : null;
+  const homeProjected = match ? computeProjectedMatchupScore(match.home) : null;
+  const awayProjected = match ? computeProjectedMatchupScore(match.away) : null;
 
   const whatIf = (actual, optimal) => {
     if (optimal === null) return '';
     const diff = optimal - actual;
     return `<div class="whatif">What-if: ${optimal.toFixed(1)}${diff > 0.05 ? ` <span class="whatif-diff">(+${diff.toFixed(1)})</span>` : ''}</div>`;
   };
+  const projLine = proj => proj !== null ? `<div class="proj-line">Proj: ${proj.toFixed(1)}</div>` : '';
 
   const homeWin = awayScore !== null && homeScore > awayScore;
   const awayWin = awayScore !== null && awayScore > homeScore;
@@ -1332,12 +1363,14 @@ function openBoxScore(week, homeId, awayId) {
       <div class="home">
         <div class="name">${teamName(home)}</div>
         <div class="score" style="color:${homeWin ? 'var(--win)' : awayWin ? 'var(--loss)' : 'var(--text)'}">${homeScore.toFixed(1)}</div>
+        ${projLine(homeProjected)}
         ${whatIf(homeScore, homeOptimal)}
       </div>
       <div class="vs">WK ${week}</div>
       <div class="away">
         <div class="name">${teamName(away)}</div>
         <div class="score" style="color:${awayWin ? 'var(--win)' : homeWin ? 'var(--loss)' : 'var(--text)'}">${awayScore.toFixed(1)}</div>
+        ${projLine(awayProjected)}
         ${whatIf(awayScore, awayOptimal)}
       </div>
     </div>

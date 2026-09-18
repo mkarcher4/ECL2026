@@ -170,7 +170,7 @@ def fetch_season_player_stats(season):
     return result
 
 
-def trim_player_entry(e):
+def trim_player_entry(e, week):
     """
     Keeps only the fields the app actually reads from a roster entry, and
     drops the rest -- ESPN's raw player objects carry a large per-category
@@ -179,16 +179,28 @@ def trim_player_entry(e):
     that this app never uses. That stats[] array in particular is the single
     biggest contributor to file size once you're pulling many weeks across
     many seasons, since it's repeated in full for every player, every week.
+
+    The one thing pulled OUT of that array rather than discarded entirely:
+    this week's projected total (statSourceId 1), so the app can show
+    projected scores without reintroducing the full stats[] bloat.
     """
     ppe = e.get("playerPoolEntry") or {}
     player = ppe.get("player") or e.get("player") or {}
     applied = ppe.get("appliedStatTotal")
     if applied is None:
         applied = e.get("appliedStatTotal")
+
+    projected = None
+    for stat in player.get("stats", []):
+        if stat.get("scoringPeriodId") == week and stat.get("statSourceId") == 1:
+            projected = stat.get("appliedTotal")
+            break
+
     return {
         "lineupSlotId": e.get("lineupSlotId"),
         "playerPoolEntry": {
             "appliedStatTotal": applied,
+            "projectedTotal": projected,
             "player": {
                 "id": player.get("id"),
                 "fullName": player.get("fullName"),
@@ -199,7 +211,7 @@ def trim_player_entry(e):
     }
 
 
-def trim_side(side):
+def trim_side(side, week):
     if not side:
         return side
     roster = (side.get("rosterForCurrentScoringPeriod")
@@ -210,16 +222,16 @@ def trim_side(side):
         "teamId": side.get("teamId"),
         "totalPoints": side.get("totalPoints"),
         "rosterForCurrentScoringPeriod": {
-            "entries": [trim_player_entry(e) for e in entries]
+            "entries": [trim_player_entry(e, week) for e in entries]
         }
     }
 
 
-def trim_matchup(m):
+def trim_matchup(m, week):
     return {
         "matchupPeriodId": m.get("matchupPeriodId"),
-        "home": trim_side(m.get("home")),
-        "away": trim_side(m.get("away")) if m.get("away") else None,
+        "home": trim_side(m.get("home"), week),
+        "away": trim_side(m.get("away"), week) if m.get("away") else None,
     }
 
 
@@ -295,7 +307,7 @@ def fetch_season_data(season):
         try:
             wk_data = get(season, ["mBoxscore", "mMatchupScore"], extra_params={"scoringPeriodId": wk})
             wk_schedule = wk_data.get("schedule", [])
-            weekly_boxscores[str(wk)] = [trim_matchup(m) for m in wk_schedule]
+            weekly_boxscores[str(wk)] = [trim_matchup(m, wk) for m in wk_schedule]
             print(f"  Week {wk}: {len(wk_schedule)} matchup(s) in box score data")
         except requests.HTTPError as e:
             print(f"  Skipped week {wk}: {e}")
