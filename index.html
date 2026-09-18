@@ -209,6 +209,7 @@
   .roster-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
   @media (max-width: 640px) { .roster-grid { grid-template-columns: 1fr; } }
   .roster-grid table td, .roster-grid table th { font-size: 13px; padding: 6px 4px; }
+  td.opp, td.game { color: var(--text-muted); font-size: 11.5px; white-space: nowrap; }
   td.slot { color: var(--text-muted); font-size: 11px; width: 42px; }
   .bench-divider td { color: var(--text-muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; padding-top: 14px; border-bottom: none; }
   tr.outperformed td { color: var(--loss); }
@@ -1225,6 +1226,33 @@ function benchCandidateEligible(benchEntry, starterSlotId) {
   return needed.includes(player.defaultPositionId);
 }
 
+// Looks up a player's opponent and kickoff time for the given week from
+// the NFL pro schedule (independent of any fantasy league). Returns null
+// fields if the schedule data isn't available (e.g. an older synced JSON
+// from before this feature, or a bye week).
+function getPlayerGameInfo(entry, week) {
+  const player = getPlayer(entry);
+  const schedule = (LEAGUE && LEAGUE.proSchedule) || {};
+  const teamAbbrevMap = (LEAGUE && LEAGUE.nflTeamAbbrev) || {};
+  if (!player || player.proTeamId === undefined || player.proTeamId === null) {
+    return { opp: '—', game: '—' };
+  }
+  const myAbbrev = teamAbbrevMap[String(player.proTeamId)] || teamAbbrevMap[player.proTeamId];
+  if (!myAbbrev) return { opp: '—', game: '—' };
+
+  const teamSchedule = schedule[myAbbrev];
+  const gameInfo = teamSchedule ? teamSchedule[String(week)] : null;
+  if (!gameInfo) return { opp: '—', game: '—' };
+
+  // Matches ESPN's own convention: away games get an "@" prefix, home
+  // games just show the plain opponent abbreviation with no prefix.
+  const opp = gameInfo.opponentAbbrev
+    ? (gameInfo.isHome ? gameInfo.opponentAbbrev : '@' + gameInfo.opponentAbbrev)
+    : '—';
+  const game = gameInfo.statusText || '—';
+  return { opp, game };
+}
+
 function rosterRows(sideData, week) {
   const entries = getRosterEntries(sideData);
   const starters = entries
@@ -1236,32 +1264,34 @@ function rosterRows(sideData, week) {
     const player = getPlayer(e);
     const name = player ? player.fullName : 'Unknown';
     const pts = getPlayerPoints(e, week);
+    const { opp, game } = getPlayerGameInfo(e, week);
     const outperformed = pts !== null && bench.some(b => {
       if (!benchCandidateEligible(b, e.lineupSlotId)) return false;
       const bPts = getPlayerPoints(b, week);
       return bPts !== null && bPts > pts;
     });
-    return `<tr class="${outperformed ? 'outperformed' : ''}"><td class="slot">${SLOT_NAMES[e.lineupSlotId] || e.lineupSlotId}</td><td>${name}</td><td class="num">${pts !== null ? pts.toFixed(1) : '—'}</td></tr>`;
+    return `<tr class="${outperformed ? 'outperformed' : ''}"><td class="slot">${SLOT_NAMES[e.lineupSlotId] || e.lineupSlotId}</td><td>${name}</td><td class="opp">${opp}</td><td class="game">${game}</td><td class="num">${pts !== null ? pts.toFixed(1) : '—'}</td></tr>`;
   };
 
   const benchRow = e => {
     const player = getPlayer(e);
     const name = player ? player.fullName : 'Unknown';
     const pts = getPlayerPoints(e, week);
+    const { opp, game } = getPlayerGameInfo(e, week);
     const shouldStart = pts !== null && starters.some(s => {
       if (!benchCandidateEligible(e, s.lineupSlotId)) return false;
       const sPts = getPlayerPoints(s, week);
       return sPts !== null && pts > sPts;
     });
-    return `<tr class="${shouldStart ? 'should-start' : ''}"><td class="slot">${SLOT_NAMES[e.lineupSlotId] || e.lineupSlotId}</td><td>${name}</td><td class="num">${pts !== null ? pts.toFixed(1) : '—'}</td></tr>`;
+    return `<tr class="${shouldStart ? 'should-start' : ''}"><td class="slot">${SLOT_NAMES[e.lineupSlotId] || e.lineupSlotId}</td><td>${name}</td><td class="opp">${opp}</td><td class="game">${game}</td><td class="num">${pts !== null ? pts.toFixed(1) : '—'}</td></tr>`;
   };
 
   let html = starters.map(starterRow).join('');
   if (bench.length) {
-    html += `<tr class="bench-divider"><td colspan="3">Bench</td></tr>` + bench.map(benchRow).join('');
+    html += `<tr class="bench-divider"><td colspan="5">Bench</td></tr>` + bench.map(benchRow).join('');
   }
   if (!entries.length) {
-    html = `<tr><td colspan="3" class="placeholder">No roster data for this week.</td></tr>`;
+    html = `<tr><td colspan="5" class="placeholder">No roster data for this week.</td></tr>`;
   }
   return html;
 }
@@ -1332,8 +1362,8 @@ function openBoxScore(week, homeId, awayId) {
   const list = MATCHUPS_BY_WEEK[week] || [];
   const summary = list.find(m => m.homeId === homeId && m.awayId === awayId) || {};
 
-  const homeRoster = match ? rosterRows(match.home, week) : '<tr><td colspan="3" class="placeholder">No box score data loaded for this week.</td></tr>';
-  const awayRoster = match ? rosterRows(match.away, week) : '<tr><td colspan="3" class="placeholder">No box score data loaded for this week.</td></tr>';
+  const homeRoster = match ? rosterRows(match.home, week) : '<tr><td colspan="5" class="placeholder">No box score data loaded for this week.</td></tr>';
+  const awayRoster = match ? rosterRows(match.away, week) : '<tr><td colspan="5" class="placeholder">No box score data loaded for this week.</td></tr>';
 
   // Live score (see computeLiveMatchupScore) falls back to the schedule
   // summary only when no box score data exists yet for this matchup.
@@ -1375,8 +1405,8 @@ function openBoxScore(week, homeId, awayId) {
       </div>
     </div>
     <div class="roster-grid">
-      <table><thead><tr><th></th><th>${teamName(home)}</th><th class="num">Pts</th></tr></thead><tbody>${homeRoster}</tbody></table>
-      <table><thead><tr><th></th><th>${teamName(away)}</th><th class="num">Pts</th></tr></thead><tbody>${awayRoster}</tbody></table>
+      <table><thead><tr><th></th><th>${teamName(home)}</th><th>OPP</th><th>GAME</th><th class="num">Pts</th></tr></thead><tbody>${homeRoster}</tbody></table>
+      <table><thead><tr><th></th><th>${teamName(away)}</th><th>OPP</th><th>GAME</th><th class="num">Pts</th></tr></thead><tbody>${awayRoster}</tbody></table>
     </div>
   `;
 }

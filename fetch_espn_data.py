@@ -206,6 +206,8 @@ def trim_player_entry(e, week):
                 "fullName": player.get("fullName"),
                 "defaultPositionId": player.get("defaultPositionId"),
                 "eligibleSlots": player.get("eligibleSlots"),
+                "proTeamId": player.get("proTeamId"),
+                "injuryStatus": player.get("injuryStatus"),
             }
         }
     }
@@ -275,6 +277,77 @@ def fetch_transactions(season):
     return result
 
 
+# ESPN's stable proTeamId -> abbreviation mapping (0 = free agent/bye).
+NFL_TEAM_ABBREV = {
+    0: "FA", 1: "ATL", 2: "BUF", 3: "CHI", 4: "CIN", 5: "CLE", 6: "DAL",
+    7: "DEN", 8: "DET", 9: "GB", 10: "TEN", 11: "IND", 12: "KC", 13: "LV",
+    14: "LAR", 15: "MIA", 16: "MIN", 17: "NE", 18: "NO", 19: "NYG",
+    20: "NYJ", 21: "PHI", 22: "ARI", 23: "PIT", 24: "LAC", 25: "SF",
+    26: "SEA", 27: "TB", 28: "WSH", 29: "CAR", 30: "JAX", 33: "BAL",
+    34: "HOU",
+}
+
+
+def fetch_pro_schedule(season, current_week):
+    """
+    Pulls opponent + live game status (kickoff time, in-progress score and
+    clock, or Final) for every NFL team, week by week, so the Box Score can
+    show each player's OPP and GAME columns the same way ESPN's own box
+    score page does.
+
+    This comes from ESPN's separate, public NFL scoreboard feed (no login
+    needed) rather than the fantasy-specific league API -- the fantasy
+    endpoints only carry the schedule, not live game state; ESPN's own box
+    score page is almost certainly pulling this same public feed to show
+    things like "41-31, 1:28 4th" for a game in progress.
+
+    Returns {} on failure so the Box Score simply omits OPP/GAME rather
+    than breaking -- this is supplementary display data, not required.
+    """
+    result = {}  # teamAbbrev -> { week (str): {opponentAbbrev, isHome, statusText} }
+    sample_printed = False
+
+    for week in range(1, current_week + 1):
+        try:
+            resp = requests.get(
+                "https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard",
+                params={"week": week, "seasontype": 2, "year": season, "dates": season},
+                timeout=20,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception as e:
+            print(f"  Could not fetch NFL scoreboard for week {week}: {e}")
+            continue
+
+        events = data.get("events", [])
+        for event in events:
+            comp = (event.get("competitions") or [{}])[0]
+            status = comp.get("status", {})
+            status_text = (status.get("type") or {}).get("shortDetail") or (status.get("type") or {}).get("detail")
+            competitors = comp.get("competitors", [])
+
+            if not sample_printed and competitors:
+                print(f"  Sample NFL scoreboard status object (week {week}): {status}")
+                sample_printed = True
+
+            for c in competitors:
+                team_abbrev = (c.get("team") or {}).get("abbreviation")
+                if not team_abbrev:
+                    continue
+                opponent = next((o for o in competitors if o is not c), None)
+                opponent_abbrev = (opponent.get("team") or {}).get("abbreviation") if opponent else None
+                is_home = c.get("homeAway") == "home"
+                result.setdefault(team_abbrev, {})[str(week)] = {
+                    "opponentAbbrev": opponent_abbrev,
+                    "isHome": is_home,
+                    "statusText": status_text,
+                }
+
+    print(f"  NFL scoreboard fetched for {len(result)} teams across {current_week} week(s)")
+    return result
+
+
 def fetch_season_data(season):
     """Fetches one full season's worth of league data (the same shape the
     app has always expected) and returns it as a dict."""
@@ -292,6 +365,7 @@ def fetch_season_data(season):
     season_player_stats = fetch_season_player_stats(season)
     transactions = fetch_transactions(season)
     faab_total_budget = core.get("settings", {}).get("acquisitionSettings", {}).get("acquisitionBudget")
+    pro_schedule = fetch_pro_schedule(season, current_week)
     # League members, trimmed to just what's needed to resolve a team's
     # owner GUID(s) into a display name for the Free Agent Budget Summary.
     members = [
@@ -325,6 +399,8 @@ def fetch_season_data(season):
         "transactions": transactions,
         "faabTotalBudget": faab_total_budget,
         "members": members,
+        "proSchedule": pro_schedule,
+        "nflTeamAbbrev": NFL_TEAM_ABBREV,
     }
 
 
