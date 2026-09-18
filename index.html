@@ -182,6 +182,7 @@
   .side .name { font-weight: 700; font-size: 14.5px; }
   .side .score { font-size: 22px; font-weight: 800; }
   .side.winner .score { color: var(--win); }
+  .side.loser .score { color: var(--loss); }
   .vs { color: var(--text-muted); font-size: 12px; font-weight: 700; padding: 0 6px; }
 
   /* Box score */
@@ -1083,23 +1084,47 @@ function renderMatchupsTab() {
   renderMatchupGrid(Number(sel.value));
 }
 
+// ESPN's schedule-level totalPoints field lags behind the actual box score
+// data -- it only updates once a scoring period fully locks, while
+// individual player stats update live during games. So the displayed score
+// is computed by summing the actual starters' live points from the box
+// score data, falling back to the schedule's totalPoints only if no box
+// score data exists yet for that matchup (e.g. a future week).
+function computeLiveMatchupScore(sideData, week) {
+  if (!sideData) return null;
+  const entries = getRosterEntries(sideData).filter(e => e.lineupSlotId !== 20 && e.lineupSlotId !== 21);
+  if (!entries.length) return null;
+  let total = 0;
+  entries.forEach(e => {
+    const pts = getPlayerPoints(e, week);
+    if (pts !== null) total += pts;
+  });
+  return total;
+}
+
 function renderMatchupGrid(week) {
   const list = MATCHUPS_BY_WEEK[week] || [];
   const grid = document.getElementById('matchupGrid');
   grid.innerHTML = list.map(m => {
     const home = TEAMS[m.homeId], away = TEAMS[m.awayId];
-    const homeWin = m.awayScore !== null && m.homeScore > m.awayScore;
-    const awayWin = m.awayScore !== null && m.awayScore > m.homeScore;
+    const box = findBoxscoreMatchup(week, m.homeId, m.awayId);
+    const liveHome = box ? computeLiveMatchupScore(box.home, week) : null;
+    const liveAway = box && box.away ? computeLiveMatchupScore(box.away, week) : null;
+    const homeScore = liveHome !== null ? liveHome : m.homeScore;
+    const awayScore = m.awayId !== null ? (liveAway !== null ? liveAway : m.awayScore) : null;
+
+    const homeWin = awayScore !== null && homeScore > awayScore;
+    const awayWin = awayScore !== null && awayScore > homeScore;
     return `
       <div class="matchup-card" onclick="openBoxScore(${week}, ${m.homeId}, ${m.awayId})">
-        <div class="side home ${homeWin ? 'winner' : ''}">
+        <div class="side home ${homeWin ? 'winner' : ''} ${awayWin ? 'loser' : ''}">
           <div class="name">${teamName(home)}</div>
-          <div class="score">${m.homeScore.toFixed(1)}</div>
+          <div class="score">${homeScore.toFixed(1)}</div>
         </div>
         <div class="vs">WK ${week}</div>
-        <div class="side away ${awayWin ? 'winner' : ''}">
+        <div class="side away ${awayWin ? 'winner' : ''} ${homeWin ? 'loser' : ''}">
           <div class="name">${teamName(away)}</div>
-          <div class="score">${m.awayScore !== null ? m.awayScore.toFixed(1) : '—'}</div>
+          <div class="score">${awayScore !== null ? awayScore.toFixed(1) : '—'}</div>
         </div>
       </div>`;
   }).join('') || '<p class="placeholder">No matchups this week.</p>';
@@ -1282,6 +1307,13 @@ function openBoxScore(week, homeId, awayId) {
   const homeRoster = match ? rosterRows(match.home, week) : '<tr><td colspan="3" class="placeholder">No box score data loaded for this week.</td></tr>';
   const awayRoster = match ? rosterRows(match.away, week) : '<tr><td colspan="3" class="placeholder">No box score data loaded for this week.</td></tr>';
 
+  // Live score (see computeLiveMatchupScore) falls back to the schedule
+  // summary only when no box score data exists yet for this matchup.
+  const liveHomeScore = match ? computeLiveMatchupScore(match.home, week) : null;
+  const liveAwayScore = match && match.away ? computeLiveMatchupScore(match.away, week) : null;
+  const homeScore = liveHomeScore !== null ? liveHomeScore : (summary.homeScore || 0);
+  const awayScore = liveAwayScore !== null ? liveAwayScore : (summary.awayScore || 0);
+
   const homeOptimal = match ? computeOptimalScore(match.home, week) : null;
   const awayOptimal = match ? computeOptimalScore(match.away, week) : null;
 
@@ -1291,19 +1323,22 @@ function openBoxScore(week, homeId, awayId) {
     return `<div class="whatif">What-if: ${optimal.toFixed(1)}${diff > 0.05 ? ` <span class="whatif-diff">(+${diff.toFixed(1)})</span>` : ''}</div>`;
   };
 
+  const homeWin = awayScore !== null && homeScore > awayScore;
+  const awayWin = awayScore !== null && awayScore > homeScore;
+
   document.getElementById('view-boxscore').innerHTML = `
     <span class="back-link" onclick="backToMatchups()">&larr; Back to matchups</span>
     <div class="box-header">
       <div class="home">
         <div class="name">${teamName(home)}</div>
-        <div class="score">${(summary.homeScore || 0).toFixed(1)}</div>
-        ${whatIf(summary.homeScore || 0, homeOptimal)}
+        <div class="score" style="color:${homeWin ? 'var(--win)' : awayWin ? 'var(--loss)' : 'var(--text)'}">${homeScore.toFixed(1)}</div>
+        ${whatIf(homeScore, homeOptimal)}
       </div>
       <div class="vs">WK ${week}</div>
       <div class="away">
         <div class="name">${teamName(away)}</div>
-        <div class="score">${(summary.awayScore || 0).toFixed(1)}</div>
-        ${whatIf(summary.awayScore || 0, awayOptimal)}
+        <div class="score" style="color:${awayWin ? 'var(--win)' : homeWin ? 'var(--loss)' : 'var(--text)'}">${awayScore.toFixed(1)}</div>
+        ${whatIf(awayScore, awayOptimal)}
       </div>
     </div>
     <div class="roster-grid">
